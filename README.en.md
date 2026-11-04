@@ -8,6 +8,14 @@ persistent kernel, **streaming output**, multiple tabs, lossless `.ipynb` round-
 
 `MIT` · `Node ≥ 20` · `DSH Desktop 0.2.1-rc.x`
 
+## Screenshots
+
+![The Notebook (v2) panel: toolbar, outline, cells (markdown / code / shell)](docs/images/overview.png)
+
+The outline pane is **resizable** (the width is remembered); the `▾` in a heading cell's gutter folds the whole section below it:
+
+![Outline: markdown headings plus each cell's first line, click to jump](docs/images/outline.png)
+
 ## Install
 
 ```bash

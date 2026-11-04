@@ -7,6 +7,14 @@
 
 `MIT` · `Node ≥ 20` · `DSH Desktop 0.2.1-rc.x`
 
+## 截图
+
+![Notebook (v2) 面板：工具栏、大纲、单元格（markdown / 代码 / Shell）](docs/images/overview.png)
+
+大纲栏可以**拖拽调宽**（宽度会记住）；标题格左侧槽位的 `▾` 折叠它下面的整节：
+
+![大纲：markdown 标题 + 每格首行，点击跳转](docs/images/outline.png)
+
 ## 安装
 
 ```bash
