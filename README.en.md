@@ -62,6 +62,8 @@ the width is remembered, double-click the splitter to reset to 200px, `←/→` 
 Collapsing hides every cell below it up to the **next heading of the same or higher level**, leaving a
 `⋯ N cells collapsed · click to expand` placeholder. The heading cell itself stays visible; nesting follows
 heading levels; jumping from the outline auto-expands the target section.
+Fold state lives with the panel mount: **switching sessions or closing the tab expands everything again**
+(it is not persisted).
 
 **AI completion**: `AI 补全` toggle (**off by default**, spends tokens). After ~0.5s of idle time a grey
 continuation appears at the caret → `Tab` accepts, `Esc` discards, typing invalidates it.
