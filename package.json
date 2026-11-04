@@ -3,8 +3,25 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "DSH Notebook v2：自研 Jupyter 前端（流式事件 + VS Code 手感）。M0 = 右栏 tab + SSE 通路",
+  "description": "DSH 右栏自研 Jupyter notebook 面板：常驻内核、流式输出、.ipynb 语义等价读写、内联 AI 改写与补全",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LearnItHard/dsh-notebook-v2.git"
+  },
+  "homepage": "https://github.com/LearnItHard/dsh-notebook-v2#readme",
+  "bugs": {
+    "url": "https://github.com/LearnItHard/dsh-notebook-v2/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "jupyter",
+    "notebook",
+    "ipynb",
+    "codemirror"
+  ],
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",

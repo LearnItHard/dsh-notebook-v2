@@ -1,12 +1,32 @@
 # dsh-notebook-v2
 
-自研 Jupyter 前端（DSH 插件）：右栏里一个真正的 notebook —— 常驻内核、**流式输出**、多标签、
-`.ipynb` 语义等价读写、**内联 AI 建议**。已替代旧插件 `@beihaizb/dsh-notebook`（可从备份一键回滚）。
+给 **DeepSeek Harness** 用的自研 Jupyter 前端插件：右栏里一个真正的 notebook ——
+常驻内核、**流式输出**、多标签、`.ipynb` 语义等价读写、**内联 AI 改写与补全**、VS Code 手感。
+已替代旧插件 `@beihaizb/dsh-notebook`（可从备份一键回滚）。
 
-- 目标运行时：**DSH Desktop 0.2.1-rc.5**
-- 计划 / 决策：`docs/plans/2026-11-03-dsh-notebook-v2-自研迭代计划.md`（§12 实施进度）
-- 评审结论：`docs/plans/2026-11-03-dsh-notebook-v2-评审结论.md`
-- 规格：[`docs/api-nb2.md`](docs/api-nb2.md)（端点契约）、[`docs/protocol-ndjson.md`](docs/protocol-ndjson.md)（sidecar 协议）
+`MIT` · `Node ≥ 20` · 目标运行时 **DSH Desktop 0.2.1-rc.5**（rc.x 的 client 插件接口）
+
+## 安装（3 条命令）
+
+```bash
+git clone https://github.com/LearnItHard/dsh-notebook-v2.git
+cd dsh-notebook-v2
+node scripts/install.mjs
+```
+
+然后重启 DeepSeek Harness（或重载窗口），右栏「+」里会出现 **Notebook (v2)**。
+
+- 装进别的 profile：`node scripts/install.mjs --profile <profile目录>`（默认 `%USERPROFILE%/.dsh/profiles/desktop`）
+- 先看它要改什么：加 `--dry-run`；不想要了：`node scripts/uninstall.mjs`
+- 内核：装了 `ipykernel` 的 conda 环境会被自动发现（工具栏「内核」下拉可切换）；
+  没有 Python 也能跑 Shell 格（`bash` / `pwsh` 子进程）。工作目录、解释器都在工具栏里改。
+
+## 文档
+
+- 端点契约：[`docs/api-nb2.md`](docs/api-nb2.md) · sidecar 协议：[`docs/protocol-ndjson.md`](docs/protocol-ndjson.md)
+- 计划：[需求统一整理与实施计划](docs/plans/2026-11-04-需求统一整理与实施计划.md) · [体验修复 v6](docs/plans/2026-11-04-体验修复v6-计划.md)
+- 评审：[Phase 1–3 评审要点](docs/phase1-3-review-brief.md)
+- 专题调研：[对话引用 API](docs/research/2026-11-04-chat-reference-api.md) · [AI 补全](docs/research/2026-11-04-ai-completion-survey.md) · [Jupyter 快捷键](docs/research/2026-11-04-jupyter-shortcuts.md)
 
 ## 能做什么
 
