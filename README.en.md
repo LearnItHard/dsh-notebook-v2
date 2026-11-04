@@ -23,6 +23,7 @@ Restart DeepSeek Harness (or reload the window) — **Notebook (v2)** shows up u
 - Preview what it changes: add `--dry-run` · Remove: `node scripts/uninstall.mjs`
 - The scripts are idempotent and back up the profile `package.json` before writing
 - Python kernels need `ipykernel`; Shell cells work without any Python install
+- To see everything below in action: open [`docs/demo/demo.ipynb`](docs/demo/demo.ipynb) and hit `▶ run all`
 
 ## What you get
 

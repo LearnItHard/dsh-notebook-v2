@@ -22,6 +22,7 @@ node scripts/install.mjs
 - 先看它会改什么：加 `--dry-run`；不想要了：`node scripts/uninstall.mjs`
 - 脚本幂等，写前自动备份 profile 的 `package.json`
 - 内核需要 `ipykernel`；没装 Python 也能用 Shell 格（`bash` / `pwsh` 子进程）
+- 装好后打开 [`docs/demo/demo.ipynb`](docs/demo/demo.ipynb) → `▶ 运行全部`，就能看到下面这些效果
 
 ## 能做什么
 
