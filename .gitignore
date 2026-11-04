@@ -1,0 +1,18 @@
+python/__pycache__/
+*.pyc
+
+# 备份 / 缓存
+*.bak*
+__pycache__/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+
+# 本机 Copilot 记忆台账（不发布）
+.github/

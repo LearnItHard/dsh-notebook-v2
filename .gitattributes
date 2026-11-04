@@ -1,0 +1,12 @@
+# 统一 LF：本仓库同时有 JS / Python / Markdown，别让 CRLF 混进来
+* text=auto eol=lf
+
+# 二进制
+*.woff2 binary
+*.woff binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.pdf binary
+
+*.ipynb text eol=lf
