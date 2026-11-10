@@ -5,7 +5,7 @@
 给 **DeepSeek Harness** 用的自研 Jupyter 前端插件：右栏里一个真正的 notebook ——
 常驻内核、**流式输出**、多标签、`.ipynb` 语义等价读写、**内联 AI 改写与补全**、VS Code 手感。
 
-`MIT` · `Node ≥ 20` · `DSH Desktop 0.2.1-rc.x`
+`MIT` · `v0.2.0` · `Node ≥ 20` · `DSH Desktop 0.2.1-rc.x`
 
 ## 截图
 
@@ -120,6 +120,7 @@ node scripts/retire-old-plugin.mjs --rollback   # 再装回加载列表
 
 ## 文档
 
+- 更新记录：[`CHANGELOG.md`](CHANGELOG.md)
 - 端点契约：[`docs/api-nb2.md`](docs/api-nb2.md) · sidecar 协议：[`docs/protocol-ndjson.md`](docs/protocol-ndjson.md)
 - 计划：[需求统一整理与实施计划](docs/plans/2026-11-04-需求统一整理与实施计划.md) · [体验修复 v6](docs/plans/2026-11-04-体验修复v6-计划.md)
 - 评审：[Phase 1–3 评审要点](docs/phase1-3-review-brief.md)

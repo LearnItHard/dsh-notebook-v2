@@ -6,7 +6,7 @@ A self-built Jupyter front-end plugin for **DeepSeek Harness**: a real notebook 
 persistent kernel, **streaming output**, multiple tabs, lossless `.ipynb` round-trip,
 **inline AI edits and completions**, VS Code muscle memory.
 
-`MIT` · `Node ≥ 20` · `DSH Desktop 0.2.1-rc.x`
+`MIT` · `v0.2.0` · `Node ≥ 20` · `DSH Desktop 0.2.1-rc.x`
 
 ## Screenshots
 
@@ -135,6 +135,7 @@ Both plugins can stay installed side by side; they just can't be enabled togethe
 
 ## Docs
 
+- Changelog: [`CHANGELOG.md`](CHANGELOG.md)
 - Endpoint contract: [`docs/api-nb2.md`](docs/api-nb2.md) · sidecar protocol: [`docs/protocol-ndjson.md`](docs/protocol-ndjson.md)
 - Plans: [requirement consolidation](docs/plans/2026-11-04-需求统一整理与实施计划.md) · [v6 UX fixes](docs/plans/2026-11-04-体验修复v6-计划.md)
 - Review: [Phase 1–3 review notes](docs/phase1-3-review-brief.md)

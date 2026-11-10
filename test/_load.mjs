@@ -38,6 +38,13 @@ export async function loadPlugin() {
     await cp(join(PKG_DIR, "lib", "katex"), join(libOut, "katex"), { recursive: true })
   }
 
+  /**
+   * package.json 也要带过去：`/nb2/health` 的 version 是从它读的。
+   * 不搬的话临时目录里没有这个文件，health 会走兜底返回 0.0.0 —— 测试壳就和真实安装
+   * （`link:` 到仓库，package.json 在）不等价了，版本断言变成假红。
+   */
+  await copyFile(join(PKG_DIR, "package.json"), join(dir, "package.json"))
+
   const indexSrc = await readFile(join(PKG_DIR, "lib", "index.js"), "utf8")
   const patched = indexSrc.replace(
     /import\s*\{\s*defineTool\s*\}\s*from\s*["']@deepseek-ai\/dsh-tools["'];?/,

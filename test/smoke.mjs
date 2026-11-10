@@ -20,7 +20,7 @@
  */
 
 import { createServer } from "node:http"
-import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, realpathSync, rmSync, existsSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, realpathSync, rmSync, existsSync } from "node:fs"
 import { cp } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, sep } from "node:path"
@@ -167,6 +167,9 @@ async function main() {
   // ── A. health ──
   const health = await (await fetch(srv.origin + "/nb2/health")).json()
   check("A. /nb2/health 正常", health.ok === true && health.pkg === "dsh-notebook-v2", `uptimeMs=${health.uptimeMs}`)
+  // 版本号只能有一个来源（package.json）。曾经三处各写一份、互相矛盾，发版对不上号。
+  const pkgVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version
+  check("A. health.version 与 package.json 一致", health.version === pkgVersion, `health=${health.version} pkg=${pkgVersion}`)
   const unknown = await fetch(srv.origin + "/nb2/nope")
   check("A. 未知端点 404", unknown.status === 404, `status=${unknown.status}`)
 

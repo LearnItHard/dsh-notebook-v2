@@ -145,6 +145,13 @@ python-env 插件里选的那个解释器，于是回落到 PATH 上的系统 py
   变成隐形色）。折叠**前**先 `stripAnsi`，否则会切在转义序列中间，屏幕上留下 `[31` 残渣。
 - **MIME 优先级表里只放真有渲染分支的 mime**：放了 `application/vnd.jupyter.widget-view+json`
   这类没有渲染器的项，`pickMime` 选中后会掉进纯文本兜底，用户看到的是一大坨 JSON（图没了）。
+- **版本号只有一个来源：`package.json`**。`/nb2/health` 的 `version` 从它读（`PKG_VERSION`），
+  README 徽章与 `docs/api-nb2.md` 的示例跟着改。曾经三处各写一份且互相矛盾
+  （package.json 0.0.1 / health 0.1.0 / 文档 0.0.1），发版时对不上号。发版流程：改
+  `package.json` → `CHANGELOG.md` 记一节 → 同步 README 徽章与 api 文档示例 → 跑测试
+  （`test/smoke.mjs` 会断言 `health.version` 与 package.json 相等）。
+  注意 `test/_load.mjs` 要把 `package.json` 一起复制到临时包目录，否则测试壳里 health 会
+  走兜底返回 0.0.0。
 - **另存为要迁移标签 key**，否则同一份 `.ipynb` 会被开出两个标签。
 - **取消 AI 生成不能写成 done**，否则前端会把半截代码当成品。
 - **ghost 的 `StateField.update` 必须先看 `tr.effects`，再看 `tr.docChanged`**：分级接受（按词 / 按行）

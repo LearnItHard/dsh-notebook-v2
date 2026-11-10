@@ -32,7 +32,7 @@ M0 只实现前三个；后两个是 M1 的形状，**路径与语义先定死**
 
 ```json
 {
-  "ok": true, "pkg": "dsh-notebook-v2", "version": "0.0.1",
+  "ok": true, "pkg": "dsh-notebook-v2", "version": "0.2.0",
   "uptimeMs": 12345, "logCap": 2000, "heartbeatMs": 15000,
   "sessions": [{ "sid": "...", "seq": 42, "minSeq": 1, "log": 42, "clients": 1 }]
 }
