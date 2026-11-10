@@ -406,20 +406,55 @@ console.log(`\n${failures.length === 0 ? "全部通过 ✅" : `${failures.length
   const src = readFileSync(CLIENT, "utf8")
   const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "")
   const aiSrc = readFileSync(new URL("../lib/ai.js", import.meta.url), "utf8")
+  const indexSrc = readFileSync(new URL("../lib/index.js", import.meta.url), "utf8")
 
   // P0-1 在途取消：新键入立刻 abort 上一个请求（否则旧请求跑完才被丢弃，白烧 token）
   check("新键入会 abort 在途补全请求", /if \(inflight && typeof inflight\.abort === "function"\)/.test(code) && code.includes("inflight.abort()"))
   // P0-2 前缀缓存
   check("补全建议有前缀缓存（LRU）", code.includes("GHOST_CACHE_LIMIT") && code.includes("const cacheGet") && code.includes("const cacheSet"))
-  check("缓存命中时直接出幽灵文本（不再发请求）", /const cached = cacheGet\(cacheKey\)/.test(code))
+  check("缓存命中时直接出幽灵文本（不再发请求）", /const cached = cacheGet\(at, doc\)/.test(code))
+  // P0-2' 最长前缀匹配（v2：继续打字也能复用，不只是退格再打回来）
+  check("缓存查找走最长前缀匹配（matchGhostCache）", code.includes("matchGhostCache(cache.values()"))
+  check("缓存条目存 pos/doc/suggestion（能算前缀增量）", /cache\.set\(key, \{ key, pos, doc, suggestion: value \}\)/.test(code))
   // P0-3 按词接受（原为死代码）
   check("acceptWord 已接线：Ctrl-→", code.includes('"Ctrl-ArrowRight"') && code.includes("onGhostWord"))
   check("acceptWord 还有 Alt-f 别名", code.includes('"Alt-f"'))
   check("CellEditor 把 onGhostWord 接到 ghostApi.acceptWord", code.includes("ghostApiRef.current.acceptWord(view)"))
+  // P0-4 按行接受（VS Code acceptNextLine）
+  check("acceptLine 已接线：Alt-]", code.includes('"Alt-]"') && code.includes("onGhostLine"))
+  check("acceptLine 还有 Ctrl-End 别名", code.includes('"Ctrl-End"'))
+  check("CellEditor 把 onGhostLine 接到 ghostApi.acceptLine", code.includes("ghostApiRef.current.acceptLine(view)"))
+  check("分级接受剩下的建议不被 docChanged 丢掉（effect 先于 docChanged）", /for \(const e of tr\.effects\) \{[\s\S]{0,200}?if \(e\.is\(setGhost\)\) return e\.value[\s\S]{0,300}?if \(tr\.docChanged\)/.test(code))
+  // P0-14 输出预算（提示词 6 行 + maxTokens + stop）
+  check("ghost 提示词写了至多 6 行", aiSrc.includes("at most 6 lines"))
+  check("宿主 ghost 路由带 maxTokens 预算", indexSrc.includes("Number(body.maxTokens) || 150"))
+  check("宿主 ghost 路由带 stop 序列", indexSrc.includes('["\\n\\n\\n", "\\n#", "\\n%%"]'))
+  check("宿主把 maxTokens/stop 交给 stream（降级重试）", aiSrc.includes("outputBudget(req)") && aiSrc.includes("if (withBudget === streamOpts || text) throw err"))
   // P0-5 内核变量进补全
   check("补全请求带上内核变量", code.includes("vars: varsForGhost") && code.includes("await loadVars()"))
   check("补全提示词有内核变量块（ai.js ghost 分支）", aiSrc.includes("Live kernel variables (name: type — detail)") && aiSrc.includes("varsBlock"))
-  check("宿主 /nb2/ai/complete 透传 vars", readFileSync(new URL("../lib/index.js", import.meta.url), "utf8").includes("vars: Array.isArray(body.vars)"))
+  check("宿主 /nb2/ai/complete 透传 vars", indexSrc.includes("vars: varsList") && indexSrc.includes("const varsList = Array.isArray(body.vars)"))
+}
+// ── AI 补全 v2（批次 B：#8 上下文预算 / #6 打分过滤器 / #13 设置项）──
+{
+  const { readFileSync } = await import("node:fs")
+  const src = readFileSync(CLIENT, "utf8")
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "")
+  const indexSrc = readFileSync(new URL("../lib/index.js", import.meta.url), "utf8")
+  // #8 跨格上下文 v2
+  check("跨格上下文改预算制（不再固定前 3 格）", code.includes("buildGhostContext(state.cells, localIdx)") && !code.includes("before.length < 3"))
+  check("markdown 格折成意图注释进上下文", code.includes("markdownIntent(src)"))
+  check("宿主上下文上限放宽到 12（预算由客户端裁）", indexSrc.includes("body.context.slice(0, 12)"))
+  check("debug 回显真正拼出来的提示词（验收：markdown 意图可在后端核对）", indexSrc.includes("messages: buildMessages(reqForAi)"))
+  // #6 打分制过滤器
+  check("触发判据改打分制（completionScore + 阈值投影）", code.includes("function completionScore(") && code.includes("return completionScore(opts) >= threshold"))
+  check("Esc 拒绝后降权（rejectedAt → rejectAt）", code.includes("rejectedAt = Date.now()") && code.includes("rejectAt: rejectedAt"))
+  // #13 设置项
+  check("防抖时长现读设置（getOptions，改设置不重建编辑器）", code.includes("getOptions: () =>") && code.includes("Number(liveOpts.debounceMs)"))
+  check("建议按 maxLines 截断", code.includes("truncateLines(suggestion, compPref.maxLines)"))
+  check("设置面板有补全参数两个输入框", code.includes('commitCompNumber("debounceMs")') && code.includes('commitCompNumber("maxLines")'))
+  // #11 增量收缩
+  check("打字时幽灵原地后退（shrinkGhost + iterChanges）", code.includes("shrinkGhost(value, inserted, at)") && code.includes("tr.changes.iterChanges("))
 }
 // ── 命令注册表接线完整性（防「加了快捷键没接命令」/ 死代码）──
 {
@@ -436,7 +471,7 @@ console.log(`\n${failures.length === 0 ? "全部通过 ✅" : `${failures.length
      * 编辑器内部命令（Tab / Ctrl-→ / Alt-\ / Mod-K）由 CM6 keymap 持有，
      * 面板执行表里没有它们是**设计如此**（需要 view 级 API）。
      */
-    const EDITOR_ONLY = ["ghost.accept", "ghost.acceptWord", "ghost.force", "ai.inline"]
+    const EDITOR_ONLY = ["ghost.accept", "ghost.acceptWord", "ghost.acceptLine", "ghost.force", "ai.inline"]
     const missing = ids.filter((id) => !handled.includes(id) && !EDITOR_ONLY.includes(id))
     check("每个面板命令都有执行体（无死代码）", missing.length === 0, missing.join(","))
     check("编辑器内部命令单独登记且不重复", EDITOR_ONLY.every((id) => ids.includes(id)))

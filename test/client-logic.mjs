@@ -66,6 +66,17 @@ console.log("dsh-notebook-v2 · client logic tests\n")
   check("完全不认识 → null", I.pickMime([{ mime: "application/x-weird" }]) === null)
   check("空 → null", I.pickMime([]) === null && I.pickMime(null) === null)
   check("laTeX 优先于 plain", I.pickMime([{ mime: "text/plain" }, { mime: "text/latex" }]).mime === "text/latex")
+  // 没有渲染分支的富 mime 不能进优先级表：选中后会掉进纯文本兜底，用户看到一坨 JSON
+  check("plotly 图回退到 text/html（不是把 JSON 甩给用户）", (() => {
+    const picked = I.pickMime([
+      { mime: "application/vnd.plotly.v1+json", data: { data: [], layout: {} } },
+      { mime: "text/html", data: "<div>chart</div>" },
+    ])
+    return picked && picked.mime === "text/html"
+  })())
+  check("只有 widget-view 时返回 null（上层显示「无可渲染」而不是 JSON）", (() => {
+    return I.pickMime([{ mime: "application/vnd.jupyter.widget-view+json", data: { model_id: "x" } }]) === null
+  })())
 }
 
 // ── 2. 折叠判定 ──
@@ -105,6 +116,12 @@ console.log("dsh-notebook-v2 · client logic tests\n")
   const disp2 = st.cells[0].outputs.find((o) => o.id === "d1")
   check("display.update 替换同 mime 而不是追加", disp2.items.length === 2 && disp2.items.find((i) => i.mime === "text/html").data === "<b>43</b>")
 
+  // 重跑同一格：cell.started 必须清掉上一轮输出（与宿主 _onStarted 对齐）
+  check("（前置）归约后已有 3 个输出块", st.cells[0].outputs.length === 3, `blocks=${st.cells[0].outputs.length}`)
+  st = I.reduceEvent(st, { ev: "cell.started", cellId: "c1", execCount: 8, at: 1 })
+  check("cell.started 清空上一轮输出（不累加）", st.cells[0].outputs.length === 0, `blocks=${st.cells[0].outputs.length}`)
+  check("cell.started 之后 execCount 更新", st.cells[0].execCount === 8)
+
   st = I.reduceEvent(st, { ev: "error", cellId: "c1", ename: "ValueError", evalue: "boom", traceback: ["t1"] })
   check("error 追加错误块", st.cells[0].outputs.some((o) => o.kind === "error" && o.ename === "ValueError"))
 
@@ -119,6 +136,28 @@ console.log("dsh-notebook-v2 · client logic tests\n")
   const before = st
   const same = I.reduceEvent(st, { ev: "nb.updated", revision: 3 })
   check("未知事件不改状态", same === before)
+}
+
+// ── 3b. 运行状态显示（2026-11-10 用户：「代码运行的时候我不知道有没有运行」）──
+{
+  console.log("\n[run status]")
+  let st = {
+    cells: [{ id: "c1", cellType: "code", source: "x", outputs: [], status: "queued", execCount: null, durationMs: null }],
+    running: null,
+    queue: ["c1"],
+    kernelState: "idle",
+  }
+  st = I.reduceEvent(st, { ev: "cell.started", cellId: "c1", execCount: 1, at: 1000 })
+  check("cell.started 记住服务端给的开始时刻", st.cells[0].startedAt === 1000, `startedAt=${st.cells[0].startedAt}`)
+  check("运行中左槽字形是能转的 ◐", I.statusGlyph(st.cells[0]) === "◐", I.statusGlyph(st.cells[0]))
+  check("空闲格字形保持 [ ]", I.statusGlyph({ status: "idle", execCount: null }) === "[ ]")
+  check("跑完格字形是 [n]", I.statusGlyph({ status: "ok", execCount: 3 }) === "[3]")
+  check("耗时 <1s 保留一位小数", I.formatElapsed(320) === "0.3s", I.formatElapsed(320))
+  check("耗时按秒取整", I.formatElapsed(12400) === "12s", I.formatElapsed(12400))
+  check("耗时超过 1 分钟带分", I.formatElapsed(62000) === "1m02s", I.formatElapsed(62000))
+  check("耗时无值时不显示乱码", I.formatElapsed(-1) === "" && I.formatElapsed(undefined) === "")
+  st = I.reduceEvent(st, { ev: "cell.done", cellId: "c1", status: "ok", durationMs: 1500, execCount: 1 })
+  check("跑完清掉 startedAt（停表）", st.cells[0].startedAt === null, `startedAt=${st.cells[0].startedAt}`)
 }
 
 // ── 4. 渲染辅助函数 ──
@@ -406,6 +445,143 @@ console.log("dsh-notebook-v2 · client logic tests\n")
   check("完全相同 → 空串（不重复插入）", T("df = pd.read", "df = pd.read") === "", JSON.stringify(T("df = pd.read", "df = pd.read")))
   check("空 prefix / 空建议安全", T("", "abc") === "abc" && T("abc", "") === "")
   check("超长文本也不卡（限长 64）", T("a".repeat(500), "a".repeat(500)) === "a".repeat(436), `${T("a".repeat(500), "a".repeat(500)).length}`)
+
+  /**
+   * P0 #2'：缓存从「精确匹配」升级为**最长前缀匹配**。
+   * 真实场景：敲 `df.he` 拿到 `ad(3)`，继续敲 `a` → 文档变了，但剩下的 `d(3)` 仍然有效；
+   * 精确匹配在这里必然落空，于是每多敲一个字符都要重付一次网络往返。
+   */
+  const G = I.matchGhostCache
+  const entry = (pos, doc, suggestion) => ({ key: `${pos}\u0000${doc}`, pos, doc, suggestion })
+  const c1 = [entry(5, "df.he", "ad(3)")]
+  check("缓存：完全相同的文档 → 命中整条建议", G(c1, { pos: 5, doc: "df.he" }).suggestion === "ad(3)")
+  check("缓存：继续打（打出来的正是建议开头）→ 只给剩下的部分", G(c1, { pos: 6, doc: "df.hea" }).suggestion === "d(3)")
+  check("缓存：打了建议之外的字符 → 不命中（用户改主意了）", G(c1, { pos: 6, doc: "df.hex" }) === null)
+  check("缓存：pos 与文档没有同步增长 → 不命中（别处碰巧同前缀）", G(c1, { pos: 99, doc: "df.hea" }) === null)
+  check("缓存：文档不以缓存为前缀（退格）→ 不命中，交回网络", G(c1, { pos: 4, doc: "df.h" }) === null)
+  check("缓存：多条命中取最长前缀", G([entry(2, "df", "head()"), entry(4, "df.h", "e_")], { pos: 5, doc: "df.he" }).suggestion === "_")
+  check("缓存：命中同时返回条目（供 LRU 刷新）", G(c1, { pos: 5, doc: "df.he" }).entry === c1[0])
+  check("缓存：空集合 / null 安全", G([], { pos: 0, doc: "" }) === null && G(null, { pos: 0, doc: "" }) === null)
+  check("缓存：脏条目（缺 suggestion）被跳过", G([{ pos: 1, doc: "a" }], { pos: 2, doc: "ab" }) === null)
+
+  // P0 #4：按行接受的切分（VS Code acceptNextLine 语义）
+  const L = I.splitNextLine
+  check("按行：多行只切第一行（含换行）", JSON.stringify(L("a = 1\nb = 2")) === JSON.stringify({ piece: "a = 1\n", rest: "b = 2" }))
+  check("按行：单行建议整段接受（按下去必须有反应）", L("foo()").piece === "foo()" && L("foo()").rest === "")
+  check("按行：以换行开头（注释触发的补全）→ 只吃那个换行", L("\nprint(1)").piece === "\n" && L("\nprint(1)").rest === "print(1)")
+  check("按行：空建议安全", L("").piece === "" && L(null).rest === "")
+  check("按行接受命令已登记（UI 能显示快捷键）", !!I.COMMANDS["ghost.acceptLine"], JSON.stringify(I.COMMANDS["ghost.acceptLine"]))
+
+  /**
+   * #6 触发判据 v2：打分制。
+   * 布尔判据只能表达「行/不行」，而「刚被 Esc 拒绝」「刚刚闭合括号」这类情形
+   * 不是绝对不行、只是此刻大概率是噪音 —— 需要一个可解释的分数 + 阈值。
+   */
+  const SC = I.completionScore
+  const baseScore = { enabled: true, doc, pos: doc.length, now: 100000, lastAt: 0 }
+  check("打分：正常行尾 = 1 分", SC(baseScore) === 1, String(SC(baseScore)))
+  check("打分：开关关着 = 0", SC({ ...baseScore, enabled: false }) === 0)
+  check("打分：刚请求过（minGap 内）= 0", SC({ ...baseScore, now: 100100, lastAt: 100000 }) === 0)
+  check("打分：空行 = 0（硬门槛）", SC({ ...baseScore, doc: "import os\n\n", pos: 11 }) === 0)
+  check(
+    "打分：Esc 拒绝后 3s 内降权到阈值以下（不再打扰）",
+    SC({ ...baseScore, rejectAt: 99000 }) === -0.5 && I.shouldRequestCompletion({ ...baseScore, rejectAt: 99000 }) === false,
+  )
+  check(
+    "打分：拒绝过但已过 3s → 恢复请求",
+    SC({ ...baseScore, rejectAt: 96000 }) === 1 && I.shouldRequestCompletion({ ...baseScore, rejectAt: 96000 }) === true,
+  )
+  const docDot = "x = 1\ndf."
+  check(
+    "打分：光标前是 . （属性访问，最典型的补全点）→ 加分",
+    SC({ ...baseScore, doc: docDot, pos: docDot.length }) === 1.5,
+    String(SC({ ...baseScore, doc: docDot, pos: docDot.length })),
+  )
+  check(
+    "打分：光标前是 : （块开始）→ 加分",
+    SC({ ...baseScore, doc: "def f():\n    y = 1\nif x:", pos: "def f():\n    y = 1\nif x:".length }) === 1.5,
+    String(SC({ ...baseScore, doc: "def f():\n    y = 1\nif x:", pos: "def f():\n    y = 1\nif x:".length })),
+  )
+  const docCloser = "x = 1\ny = len(z)"
+  check(
+    "打分：光标前刚闭合括号 → 减分（大概率这句写完了）→ 不请求",
+    SC({ ...baseScore, doc: docCloser, pos: docCloser.length }) === 0.5 && I.shouldRequestCompletion({ ...baseScore, doc: docCloser, pos: docCloser.length }) === false,
+  )
+  check("阈值可配：threshold=1.6 时 1.5 分也不请求", I.shouldRequestCompletion({ ...baseScore, doc: docDot, pos: docDot.length, threshold: 1.6 }) === false)
+  check("拒绝 + 属性访问 = 0 分（仍是负收益）", SC({ ...baseScore, doc: docDot, pos: docDot.length, rejectAt: 99000 }) === 0)
+
+  /**
+   * #8 跨格上下文 v2：预算制 + markdown 意图。
+   */
+  const BG = I.buildGhostContext
+  const mdCells = [
+    { id: "md", cellType: "markdown", source: "## 数据清洗\n\n去掉缺失值，统一类型" },
+    { id: "c1", cellType: "code", source: "import pandas as pd\ndf = pd.read_csv('a.csv')" },
+    { id: "c2", cellType: "code", source: "cur = 1" },
+  ]
+  const ctx2 = BG(mdCells, 2)
+  check("上下文：按时间顺序返回（远 → 近）", ctx2.map((c) => c.kind).join(",") === "markdown,code", JSON.stringify(ctx2.map((c) => c.kind)))
+  check("上下文：markdown 折成一行意图注释", ctx2[0].source.startsWith("# 数据清洗") && ctx2[0].source.includes("去掉缺失值"), ctx2[0].source)
+  check("上下文：代码格仍给原文", ctx2[1].source.includes("import pandas as pd"))
+  check("上下文：第一格之前没有上下文", BG(mdCells, 0).length === 0)
+  check(
+    "上下文：localIdx 未知 → 宁可不给（给错会把当前格当上下文，模型原样抄回来）",
+    BG(mdCells, -1).length === 0 && BG(mdCells, null).length === 0,
+  )
+
+  const many = []
+  for (let i = 0; i < 20; i += 1) many.push({ cellType: "code", source: `x${i} = ${"a".repeat(500)}` })
+  many.push({ cellType: "code", source: "cur = 1" })
+  const budgeted = BG(many, many.length - 1, { budgetChars: 1200, cellChars: 500 })
+  check("上下文：按总预算截断（不是固定 3 格）", budgeted.length >= 2 && budgeted.length <= 4, `count=${budgeted.length}`)
+  check("上下文：总字符数不超预算", budgeted.reduce((n, c) => n + c.source.length, 0) <= 1200, String(budgeted.reduce((n, c) => n + c.source.length, 0)))
+  check("上下文：离光标最近的格一定在里面（且是尾部）", budgeted[budgeted.length - 1].source === many[many.length - 2].source.slice(-500))
+  check(
+    "上下文：单格超长留尾部（最近的代码在后）",
+    BG([{ cellType: "code", source: "A".repeat(200) + "tail" }], 1, { cellChars: 120 })[0].source === "A".repeat(116) + "tail",
+  )
+
+  check("markdownIntent：标题 + 首行正文", I.markdownIntent("## 数据清洗\n\n去掉缺失值") === "# 数据清洗 — 去掉缺失值")
+  check("markdownIntent：只有标题", I.markdownIntent("### 结论") === "# 结论")
+  check("markdownIntent：跳过围栏与后续标题", I.markdownIntent("# T\n```python\nx=1\n```\n正文") === "# T — 正文")
+  check("markdownIntent：空/无标题安全", I.markdownIntent("") === "" && I.markdownIntent("   \n\n") === "")
+  check("markdownIntent：截断到上限", I.markdownIntent("# " + "长".repeat(300), 20).length <= 20)
+
+  // #13 行数截断
+  check("truncateLines：超行数就截", I.truncateLines("a\nb\nc\nd", 2) === "a\nb")
+  check("truncateLines：不超行数原样返回", I.truncateLines("a\nb", 6) === "a\nb")
+  check("truncateLines：maxLines 非法回默认 6", I.truncateLines("1\n2\n3\n4\n5\n6\n7", 0) === "1\n2\n3\n4\n5\n6")
+  check("truncateLines：空安全", I.truncateLines(null, 3) === "")
+
+  // #11 增量收缩：打字时幽灵后退，而不是一打就没
+  const SG = I.shrinkGhost
+  check("收缩：敲的正是建议开头 → 幽灵后退一格", JSON.stringify(SG({ pos: 5, suggestion: "ad(3)" }, "a", 5)) === JSON.stringify({ pos: 5, suggestion: "d(3)" }))
+  check("收缩：多字符（粘贴建议开头）也能收缩", SG({ pos: 5, suggestion: "ad(3)" }, "ad", 5).suggestion === "(3)")
+  check("收缩：在别处改字 → 作废（幽灵不能漂）", SG({ pos: 5, suggestion: "ad(3)" }, "a", 3) === null)
+  check("收缩：敲的内容与建议不符 → 作废", SG({ pos: 5, suggestion: "ad(3)" }, "x", 5) === null)
+  check("收缩：把建议敲完了 → 作废（没有剩余）", SG({ pos: 5, suggestion: "a" }, "a", 5) === null)
+  check("收缩：空建议 / 空插入安全", SG(null, "a", 0) === null && SG({ pos: 0, suggestion: "" }, "a", 0) === null)
+
+  // #13 设置项：夹取与持久化
+  const NC = I.normalizeCompletion
+  check("补全设置：默认防抖 550 / 最多 6 行", NC(null).debounceMs === 550 && NC(null).maxLines === 6)
+  check("补全设置：太小的防抖夹到 100", NC({ debounceMs: 5 }).debounceMs === 100)
+  check("补全设置：太大的防抖夹到 2000", NC({ debounceMs: 99999 }).debounceMs === 2000)
+  check("补全设置：行数夹到 1–20", NC({ maxLines: 0 }).maxLines === 1 && NC({ maxLines: 99 }).maxLines === 20)
+  check("补全设置：非数字回落默认", NC({ debounceMs: "abc", maxLines: "x" }).debounceMs === 550)
+  check("补全设置：保留模型三件套与开关", (() => {
+    const c = NC({ provider: "p", model: "m", reasoningEffort: "high", enabled: true })
+    return c.provider === "p" && c.model === "m" && c.reasoningEffort === "high" && c.enabled === true
+  })())
+  check("补全设置：存盘/读回往返（含两个手感参数）", (() => {
+    const mem = (() => {
+      const map = new Map()
+      return { getItem: (k) => (map.has(k) ? map.get(k) : null), setItem: (k, v) => map.set(k, v) }
+    })()
+    I.saveAiPrefs({ completion: { ...NC(null), enabled: true, debounceMs: 800, maxLines: 8 }, inline: {} }, mem)
+    const back = I.loadAiPrefs(mem).completion
+    return back.enabled === true && back.debounceMs === 800 && back.maxLines === 8
+  })())
 }
 
 // ── 10. 容器态键位的死分支回归（Shift-Enter 必须能运行，不能被 Enter 吞掉） ──
@@ -590,20 +766,102 @@ console.log("dsh-notebook-v2 · client logic tests\n")
   const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "")
 
   /**
-   * 历史教训（已实测确认）：旧实现读 `props.inputActions.appendDraft`。但 slot 拿到的
-   * InputActions 公开只有 8 个方法（captureInsertion/insertText/setDraft/persistDraft/
-   * addAttachments/removeAttachment/pruneAttachments/submit）—— **没有 appendDraft，
-   * 也没有 insertReference**。所以那个判断恒为假，用户看到「点了只进剪贴板」。
-   * 下面几条断言防的是回退到旧写法，或把芯片通道写丢。
+   * 2026-11-06 实测修正（推翻上一轮结论）：
+   *  · 客户端 service 目录里**没有 `conversation`**（只有 layout/locale/sessions/slots/
+   *    theme/timer/uiWorkspace/workspaces），所以「会话桥」这条路在本版恒为 null；
+   *  · 真正可用的是 slot props 的 `inputActions`：`captureInsertion()` 给
+   *    `{start,end,draftRev}`，`insertText(text, span)` 真的把字插进 Lexical 编辑器。
+   * 下面这些断言防的是「又退回 appendDraft / 只走 ctx / 把兜底写丢」。
    */
+  check("主通道是 slot props 的 inputActions（不是 ctx）", code.includes("deliverInputText(slotInputActions"), "")
+  check("插入位置来自 captureInsertion", code.includes("actions.captureInsertion()"), "")
+  check("写入走 insertText(text, span)", code.includes("actions.insertText(body, span)"), "")
   check("不再用 props.inputActions.appendDraft（该版本没有这个方法）", !code.includes("ia.appendDraft("), "")
-  check("走会话作用域的 conversation 服务", code.includes('ctx.get("conversation")'), "")
-  check("芯片走 slash/input-insert-reference 事件", code.includes("slash/input-insert-reference"), "")
-  check("芯片 span 带 draftRev（CAS 契约）", /span:\s*\{\s*draftRev:/.test(code), "")
-  check("芯片 appearance 是 file（渲染成文件卡片）", /appearance:\s*"file"/.test(code), "")
-  check("保留纯文本降级（setDraft）", code.includes("input.setDraft(next)"), "")
-  check("保留剪贴板兜底（拿不到会话作用域时）", code.includes("navigator.clipboard.writeText(body)"), "")
+  check(
+    "sessions 走 ctx.get（属性访问会被门面抛错）",
+    code.includes('ctx.get("sessions")') && !/ctx\.sessions\b/.test(code),
+    "",
+  )
+  check("conversation 服务保留为前向兼容通道", code.includes('ctx.get("conversation")'), "")
+  check("保留剪贴板兜底（只有两层都失败时才用）", code.includes("navigator.clipboard.writeText(body)"), "")
   check("没有 window.prompt/confirm/alert（Electron 里被禁用）", !/window\.(prompt|confirm|alert)\s*\(/.test(code), "")
+
+  console.log("\n[deliverInputText：投递分层与失败原因]")
+  const D = I.deliverInputText
+  check("没有 inputActions → layer=no-actions", D(null, "x").layer === "no-actions")
+  check("空白文本 → layer=empty", D({ captureInsertion() {}, insertText() {} }, "   ").layer === "empty")
+  check("缺 insertText → 报出实际有哪些方法", (() => {
+    const r = D({ setDraft() {} }, "x")
+    return r.layer === "no-insertText" && r.reason.includes("setDraft")
+  })())
+  check("正常插入 → ok，且只调用一次", (() => {
+    let n = 0
+    const r = D(
+      {
+        captureInsertion: () => ({ start: 0, end: 0, draftRev: 1 }),
+        insertText: (t, s) => {
+          n += 1
+          return t === "hello" && s.draftRev === 1
+        },
+      },
+      "hello",
+    )
+    return r.ok && n === 1 && r.layer === "insertText"
+  })())
+  check("草稿 rev 竞态：第一次被拒、重试成功", (() => {
+    let n = 0
+    const r = D({ captureInsertion: () => ({ start: 0, end: 0, draftRev: n }), insertText: () => (n += 1) > 1 }, "x")
+    return r.ok && n === 2
+  })())
+  check("一直被拒 → layer=insertText-refused，且带原因", (() => {
+    const r = D({ captureInsertion: () => ({ draftRev: 0 }), insertText: () => false }, "x")
+    return !r.ok && r.layer === "insertText-refused" && r.reason.length > 0
+  })())
+  check("captureInsertion 抛错不冒泡，原因里带异常文本", (() => {
+    const r = D(
+      {
+        captureInsertion: () => {
+          throw new Error("boom")
+        },
+        insertText: () => true,
+      },
+      "x",
+    )
+    return !r.ok && r.reason.includes("boom")
+  })())
+  check("inputActionsCaps 只报真实存在的方法", (() => {
+    const caps = I.inputActionsCaps({ insertText: () => {}, captureInsertion: () => {}, submit: () => {} })
+    return caps.canInsertText && !caps.canSetDraft && caps.methods.length === 3
+  })())
+
+  console.log("\n[buildChatPrompt：交给对话的提示词]")
+  const P = I.buildChatPrompt
+  const p1 = P({ path: "E:\\ws\\a\\nb.ipynb", title: "nb.ipynb", cellIndex: 3, source: "print(1)", instruction: "加注释" })
+  check("带位置（路径 + Cell 序号）", p1.includes("E:/ws/a/nb.ipynb") && p1.includes("Cell[3]"))
+  check("带用户要求", p1.includes("我的要求：加注释"))
+  check("带代码围栏与标题", p1.includes('```python title="nb.ipynb#Cell[3]"') && p1.includes("print(1)"))
+  check("告诉 agent 走 nb_* 工具（而不是猜文件）", p1.includes('nb_open(path="E:/ws/a/nb.ipynb")') && p1.includes("nb_edit_cell"))
+  const p2 = P({
+    path: "nb.ipynb",
+    cellIndex: 2,
+    source: "a\nb\nc",
+    selection: { startLine: 1, endLine: 1, text: "b" },
+    mode: "rewrite-selection",
+  })
+  check("选区模式声明「只改选中行」", p2.includes("只改我选中的那几行") && p2.includes("选中的那几行"))
+  check("单行选区写成 第 2 行（不是 第 2–2 行）", p2.includes("第 2 行") && !p2.includes("第 2–2 行"))
+  const p3 = P({ path: "nb.ipynb", cellIndex: 1, source: "x=1", mode: "explain" })
+  check("解释模式不许改代码、也不给 nb_edit 指引", p3.includes("不要改代码") && !p3.includes("nb_edit_cell"))
+  const p4 = P({
+    path: "nb.ipynb",
+    cellIndex: 1,
+    source: "x",
+    vars: [{ name: "df", detail: "DataFrame columns: a" }],
+    error: { ename: "ValueError", evalue: "bad", traceback: "tb" },
+  })
+  check("带内核变量与报错", p4.includes("df：DataFrame columns: a") && p4.includes("ValueError: bad"))
+  const longSrc = Array.from({ length: 400 }, (_, i) => "line" + i).join("\n")
+  check("超长源码被截断（不把整格灌进对话）", P({ path: "n.ipynb", cellIndex: 1, source: longSrc }).includes("已截断"))
 }
 
 // ── 13. 面板级 Enter 组合分发（v6 第 3 条反馈的判定矩阵） ──
@@ -943,8 +1201,16 @@ console.log("dsh-notebook-v2 · client logic tests\n")
   check("picker 不再用 /nb2/notebooks 做列举", !/fetch\(`\/nb2\/notebooks/.test(code))
   check("打开走 notebook/open", code.includes('post("notebook/open"'))
 
-  // P1 5.10：markdown 单击进编辑
-  check("MarkdownView 单击进编辑（onClick 里 onEdit）", /onClick: \(e\) => \{[\s\S]{0,500}?onEdit\(\{/.test(code))
+  // P1 5.10（2026-11-10 用户修订）：markdown 渲染态改为**双击**才进编辑，单击只选中本格
+  const mdView = code.slice(code.indexOf("function MarkdownView"), code.indexOf("const dividerBtn"))
+  const mdClick = mdView.slice(mdView.indexOf("onClick: (e) => {"), mdView.indexOf("onDoubleClick: (e) => {"))
+  check("MarkdownView 单击不进编辑（onClick 里没有 onEdit）", mdClick.length > 0 && !mdClick.includes("onEdit("))
+  check("MarkdownView 单击仍 stopPropagation（否则外层容器 resolveCellClick 会 enterEdit）", mdClick.includes("stopPropagation"))
+  check(
+    "MarkdownView 双击进编辑（onDoubleClick 里 onEdit）",
+    mdView.slice(mdView.indexOf("onDoubleClick: (e) => {")).slice(0, 800).includes("onEdit({"),
+  )
+  check("预览区不再提示「单击编辑」", !code.includes("点击编辑（双击也行"))
   check("Enter 组合里没有 Ctrl-Shift-Enter（不发明第四个键位）", !/ctrlKey && e\.shiftKey/.test(code))
 }
 
@@ -1281,6 +1547,64 @@ console.log("dsh-notebook-v2 · client logic tests\n")
   check("被折叠的格是整格不渲染（return null），不是 display:none", /if \(fold\.hidden\.has\(cell\.id\)\) return null/.test(src))
   check("折叠后把选中挪到标题格（被折的格不该还是当前格）", /setSelected\(cellId\)[\s\S]{0,200}?next\.add\(cellId\)/.test(src))
   check("有「⋯ 已折叠 N 格」占位（免得整节凭空消失被当成 bug）", src.includes("已折叠 ${section.hiddenCount} 格"))
+}
+
+// ── HTML 输出（pandas DataFrame）：iframe 基线样式 + 宿主主题注入 ──
+{
+  console.log("[HTML 输出]")
+  const TABLE = '<table class="dataframe"><tbody><tr><th>Ar</th><td>6505</td></tr></tbody></table>'
+  const doc = I.buildOutputHtmlDoc(TABLE, { fg: "rgb(32, 33, 36)" })
+
+  check("输出原样带进 srcdoc（不二次转义）", doc.includes(TABLE))
+  check("声明 UTF-8（中文表头不能吃系统代码页）", doc.includes('<meta charset="utf-8">'))
+  check("宿主前景色写成具体值（iframe 继承不到宿主 CSS）", doc.includes("color:rgb(32, 33, 36)"))
+  check("暗前景 → color-scheme:light", doc.includes("color-scheme:light"))
+  check("亮前景 → color-scheme:dark", I.buildOutputHtmlDoc("x", { fg: "rgb(235, 235, 245)" }).includes("color-scheme:dark"))
+  check("没给 fg 时用兜底色，不会出现空 color:", !/color:;/.test(I.buildOutputHtmlDoc("x")) && I.buildOutputHtmlDoc("x").includes(I.OUTPUT_FALLBACK_FG))
+  check("高度上报脚本还在（iframe 自适应高度）", doc.includes("__nb2") && doc.includes("ResizeObserver"))
+  check("Node 里没有 DOM → readHostForeground 空串且不炸", I.readHostForeground() === "")
+
+  const css = I.buildOutputHtmlCss("rgb(1, 2, 3)")
+  check('干掉 pandas border="1" 的粗黑网格', css.includes("border:0") && css.includes("border-collapse:collapse"))
+  check("表头只有下横线（JupyterLab 的观感）", /table thead th\{[^}]*border-bottom:1px solid/.test(css))
+  check("斑马纹 + hover 挂在 tbody tr 上", css.includes("tbody tr:nth-child(even)") && css.includes("tbody tr:hover"))
+  check("单元格透明，行底色才透得出来", /tbody th\{[^}]*background:transparent/.test(css))
+  check("pandas 数值列右对齐", css.includes("table.dataframe tbody td{text-align:right}"))
+  check("pandas 索引列左对齐", css.includes("table.dataframe tbody th{text-align:left}"))
+  check("派生色走 currentColor 混合（跟随明暗主题）", css.includes("color-mix(in srgb,currentColor"))
+  check("不写死主题色（不重蹈 oneDark 覆辙）", !/#fff|#000|oneDark|#1e1e1e/i.test(css))
+  check("等宽数字（列宽不抖）", css.includes("tabular-nums"))
+}
+
+// ── ANSI 终端色：stream / traceback 里的转义序列要变成颜色，不能原样吐给用户 ──
+{
+  console.log("[ANSI]")
+  const one = I.parseAnsi("hello")
+  check("没有转义码 → 单段原样", one.length === 1 && one[0].text === "hello" && one[0].style.fg === null)
+  check("红色切出独立段，其余不受影响", (() => {
+    const segs = I.parseAnsi("a\u001b[31mRED\u001b[0mb")
+    return segs.length === 3 && segs.map((s) => s.text).join("") === "aREDb" && segs[1].style.fg.includes("color-mix")
+  })())
+  check("reset 之后样式回到空", I.parseAnsi("\u001b[31mx\u001b[0my")[1].style.fg === null)
+  check("粗体 + 下划线同时生效", (() => {
+    const st = I.parseAnsi("\u001b[1;4mB\u001b[0m")[0].style
+    return st.bold === true && st.underline === true
+  })())
+  check("亮色比标准色更靠近正文色（58% vs 80%）", (() => {
+    const a = I.parseAnsi("\u001b[31mX")[0].style.fg
+    const b = I.parseAnsi("\u001b[91mX")[0].style.fg
+    return a.includes("80%") && b.includes("58%")
+  })())
+  check("256 色（38;5;196 → 纯红）", I.parseAnsi("\u001b[38;5;196mX")[0].style.fg === "rgb(255, 0, 0)")
+  check("truecolor（38;2;10;20;30）", I.parseAnsi("\u001b[38;2;10;20;30mX")[0].style.fg === "rgb(10, 20, 30)")
+  check("背景色只上淡底（不吞掉前景）", I.parseAnsi("\u001b[41mX")[0].style.bg.includes("16%"))
+  check("非 SGR 的转义（光标移动）不误伤文字", I.stripAnsi("a\u001b[2Kb") === "ab")
+  check("折叠前剥 ANSI（否则切出 `[31` 残渣）", I.stripAnsi("\u001b[31mhello\u001b[0m") === "hello")
+  check("ansiNodes 无转义码时原样返回字符串（零额外节点）", typeof I.ansiNodes("plain") === "string")
+  check("ansiNodes 有转义码时产出带色 span", (() => {
+    const nodes = I.ansiNodes("\u001b[31mR\u001b[0m")
+    return Array.isArray(nodes) && nodes.length >= 1 && nodes[0].type === "span" && !!nodes[0].props.style.color
+  })())
 }
 
 console.log(`\n${failures.length === 0 ? "全部通过 ✅" : `${failures.length} 项失败 ❌：${failures.join(" | ")}`}`)

@@ -57,6 +57,14 @@ console.log("dsh-notebook-v2 · model/ipynb tests\n")
   // stderr 与 stdout 不共用块
   nb.applyEvent("stream", { cellId: id, name: "stderr", text: "warn\n" })
   check("stdout/stderr 分成两块", nb.cell(id).outputs.length === 4, `blocks=${nb.cell(id).outputs.length}`)
+
+  // 重跑同一格：必须清掉上一轮输出，否则每跑一次就把新输出接在后面（用户看到三四份重复结果）
+  nb.applyEvent("cell.done", { cellId: id, status: "ok" })
+  check("（前置）这一轮攒了 4 个输出块", nb.cell(id).outputs.length === 4, `blocks=${nb.cell(id).outputs.length}`)
+  nb.applyEvent("cell.started", { cellId: id, execCount: 2 })
+  const rerun = nb.cell(id)
+  check("重跑清空上一轮输出（不累加）", rerun.outputs.length === 0, `blocks=${rerun.outputs.length}`)
+  check("重跑同时清掉 lastStream（否则新 stream 会去找已消失的 outId）", rerun.lastStream === null)
 }
 
 // ───────────────── 2. display update 走替换 ─────────────────

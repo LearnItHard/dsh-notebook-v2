@@ -7,7 +7,7 @@
  * 运行：node dsh-notebook-v2/test/ai.mjs
  */
 
-import { extractTextDelta, terminalOf, buildMessages, resolveTarget, runCompletion, listAiCatalog, modelEfforts } from "../lib/ai.js"
+import { extractTextDelta, terminalOf, buildMessages, resolveTarget, runCompletion, listAiCatalog, modelEfforts, outputBudget } from "../lib/ai.js"
 
 const failures = []
 function check(label, ok, detail) {
@@ -236,9 +236,102 @@ console.log("dsh-notebook-v2 · AI bridge\n")
   const ghostNoCtx = buildMessages({ mode: "ghost", prefix: "a=1\n", suffix: "" })
   check("ghost 无上下文时不写空标题", !ghostNoCtx[1].content[0].text.includes("Earlier notebook cells"))
 
+  /**
+   * #8 跨格上下文 v2：markdown 格折成「意图注释」单独成块。
+   * 旧行为一个字都不送 → 「## 数据清洗」下面补出来的代码跟章节意图无关。
+   */
+  const ghostMd = buildMessages({
+    mode: "ghost",
+    prefix: "df = pd.read_csv('a.csv')\n",
+    suffix: "",
+    context: [
+      { source: "# 数据清洗 — 去掉缺失值", kind: "markdown" },
+      { source: "import pandas as pd", kind: "code" },
+      { source: "ls -la", kind: "bash" },
+    ],
+  })
+  const mdText = ghostMd[1].content[0].text
+  check("ghost 把 markdown 章节意图写进上下文", mdText.includes("Notebook section intent") && mdText.includes("数据清洗"), mdText.slice(0, 120))
+  check("markdown 意图不包 python 围栏（它就是一行注释）", !mdText.includes("```python\n# 数据清洗"))
+  check("bash 格用 bash 围栏（不再一律标 python）", mdText.includes("```bash\nls -la"))
+  check("代码格仍在 Earlier notebook cells 块里", mdText.includes("Earlier notebook cells") && mdText.includes("import pandas as pd"))
+
   // 解释模式：不要求返回代码
   const exMsg = buildMessages({ mode: "explain", code: "x=1", instruction: "什么作用" })
   check("解释模式要求散文而不是代码", /plain prose/.test(exMsg[0].content[0].text))
+}
+
+// ── 9b. 输出预算（P0 #14：maxTokens / stop + 宿主不认时降级）──
+{
+  console.log("\n[输出预算 maxTokens / stop]")
+  check("正常值透传", outputBudget({ maxTokens: 150 }).maxTokens === 150)
+  check("非法 / 缺失 maxTokens 丢掉", outputBudget({}).maxTokens === undefined && outputBudget({ maxTokens: "abc" }).maxTokens === undefined && outputBudget({ maxTokens: -5 }).maxTokens === undefined)
+  check("maxTokens 夹上限（不要一次补一整本 notebook）", outputBudget({ maxTokens: 99999 }).maxTokens === 4096)
+  check("stop 过滤非字符串/空串", JSON.stringify(outputBudget({ stop: ["\n\n", "", null, 3] }).stop) === JSON.stringify(["\n\n"]))
+  check("空 stop 数组不传字段", outputBudget({ stop: [] }).stop === undefined)
+  check("null 安全", Object.keys(outputBudget(null)).length === 0)
+
+  // ghost 提示词要写明行数上限（与宿主预算双保险）
+  const ghostSys = buildMessages({ mode: "ghost", prefix: "a=1\n", suffix: "" })[0].content[0].text
+  check("ghost 提示词写了「至多 6 行」", /at most 6 lines/.test(ghostSys), ghostSys.slice(0, 80))
+
+  const seen = []
+  const fake = {
+    listProviders: async () => ["p"],
+    listModels: async () => [{ id: "m" }],
+    async *stream(opts) {
+      seen.push(opts)
+      yield { kind: "text-delta", text: "df.head()" }
+      yield { kind: "finish" }
+    },
+  }
+  const c1 = collector()
+  await runCompletion({ llm: fake, cfg: {} }, { mode: "ghost", prefix: "df", maxTokens: 150, stop: ["\n\n\n"] }, c1.write)
+  check("streamOpts 带上 maxTokens", seen[0].maxTokens === 150, JSON.stringify(Object.keys(seen[0])))
+  check("streamOpts 带上 stop", Array.isArray(seen[0].stop) && seen[0].stop[0] === "\n\n\n")
+  check("有预算时补全照常产出", c1.of("done").length === 1 && c1.of("done")[0].text === "df.head()")
+
+  const c2 = collector()
+  await runCompletion({ llm: fake, cfg: {} }, { mode: "ghost", prefix: "df" }, c2.write)
+  check("不传预算 → 不塞这两个字段（让宿主用自己的默认）", !("maxTokens" in seen[1]) && !("stop" in seen[1]))
+
+  /**
+   * 宿主对未知字段严格校验（有的版本直接抛）→ 必须降级重试，而不是把补全弄挂。
+   * 这里模拟「第一次带预算就抛，第二次不带才跑」。
+   */
+  let attempts = 0
+  const strict = {
+    listProviders: async () => ["p"],
+    listModels: async () => [{ id: "m" }],
+    async *stream(opts) {
+      attempts += 1
+      if ("maxTokens" in opts) throw new Error("unknown option: maxTokens")
+      yield { kind: "text-delta", text: "ok" }
+      yield { kind: "finish" }
+    },
+  }
+  const c3 = collector()
+  const out3 = await runCompletion({ llm: strict, cfg: {} }, { mode: "ghost", prefix: "x", maxTokens: 150 }, c3.write)
+  check("宿主不认 maxTokens → 降级重试后仍能补全", out3.error === undefined && c3.of("done")[0].text === "ok")
+  check("降级只重试一次（不无限重试）", attempts === 2, `attempts=${attempts}`)
+
+  /**
+   * 已经吐出文本后再抛错 → **不能**重试（否则同一段补全会吐两遍）。
+   */
+  let attempts2 = 0
+  const half = {
+    listProviders: async () => ["p"],
+    listModels: async () => [{ id: "m" }],
+    async *stream() {
+      attempts2 += 1
+      yield { kind: "text-delta", text: "df." }
+      throw new Error("boom")
+    },
+  }
+  const c4 = collector()
+  const out4 = await runCompletion({ llm: half, cfg: {} }, { mode: "ghost", prefix: "d", maxTokens: 150 }, c4.write)
+  check("已产出文本后出错不重试（不重复吐字）", attempts2 === 1 && c4.of("delta").length === 1)
+  check("这时仍按失败上报", out4.error === "E_STREAM")
 }
 
 // ── 10. resolveTarget：必须认 currentSelection()（0.2.1-rc.5 的真实方法名）──

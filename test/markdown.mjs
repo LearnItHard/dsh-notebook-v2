@@ -365,6 +365,39 @@ console.log("dsh-notebook-v2 · markdown render tests\n")
   check("② 超限时渲染的是 <pre>", !!(b2.children && b2.children[0] && b2.children[0].type === "pre"))
   check("③ 无富渲染+正常 → 用 h() 渲染", !b3.props.dangerouslySetInnerHTML && !!(b3.children && b3.children.length))
   check("④ 无富渲染+超限 → 也有内容（不白屏）", !b4.props.dangerouslySetInnerHTML && !!(b4.children && b4.children.length))
+
+  /**
+   * 交互契约（2026-11-10 用户要求）：markdown 渲染态**双击**才进编辑，单击只选中本格。
+   * 直接调 vdom 上的 props，不靠源码正则 —— 正则只能证明代码长这样，证明不了点下去会发生什么。
+   */
+  {
+    let edits = []
+    let selects = []
+    let stopped = 0
+    const md = I.MarkdownView({
+      source: "# T\n\n正文",
+      CM,
+      sid: "s1",
+      cellId: "c1",
+      onEdit: (info) => edits.push(info || {}),
+      onSelect: (id) => selects.push(id),
+    })
+    const ev = (clientY) => ({
+      clientY,
+      currentTarget: { getBoundingClientRect: () => ({ top: 0 }) },
+      stopPropagation: () => {
+        stopped++
+      },
+    })
+    md.props.onClick(ev(30))
+    check("单击：不调 onEdit（不进编辑）", edits.length === 0, `edits=${edits.length}`)
+    check("单击：选中本格", selects.length === 1 && selects[0] === "c1")
+    check("单击：stopPropagation（否则外层容器会 enterEdit）", stopped === 1, `stopped=${stopped}`)
+    md.props.onDoubleClick(ev(30))
+    check("双击：进编辑", edits.length === 1, `edits=${edits.length}`)
+    check("双击：带估算行号（落在双击处，不回文首）", edits.length === 1 && Number(edits[0].line) >= 1, JSON.stringify(edits[0]))
+    check("双击：也选中本格", selects.length === 2)
+  }
 }
 
 // ── 8. md 作用域 CSS：判据都在 ──

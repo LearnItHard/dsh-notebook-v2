@@ -15,6 +15,7 @@
  */
 
 import { readFile, mkdtemp } from "node:fs/promises"
+import { execFileSync } from "node:child_process"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -202,6 +203,29 @@ async function main() {
     const text3 = cell3.outputs[0] && cell3.outputs[0].text ? cell3.outputs[0].text : ""
     check("一万行内容完整（不小于 20000 字符）", text3.length > 20000, `len=${text3.length}`)
 
+    // ── 3b. 中文源码必须原样进内核（2026-11-10 真机事故回归）──
+    /**
+     * 事故链路：Windows 下驱动的 stdin/stdout 走系统代码页（cp936/GBK），
+     * 宿主写的是 UTF-8 → 中文关键字参数被解成 U+FFFD → `SyntaxError: invalid character`；
+     * 而含 U+FFFD 的报错帧 GBK 编不出来 → Emitter 走 os._exit(1) → 内核当场死。
+     * 用户看到的就是「点了运行，什么也没发生」。
+     *
+     * 这条用例同时钉住两件事：中文能跑，且输出不是乱码。
+     * 注意它必须排在「中断」之前跑：刚被 SIGINT 过的内核偶尔会把下一次执行也打成
+     * cancelled，那是中断语义的固有时序，不是这条用例要验的东西。
+     */
+    r = await postJson(srv.origin, "/nb2/cell/add", {
+      sid: SID,
+      source: "kw = dict(宽=1, 高=2)\nprint('宽 =', kw['宽'])",
+    })
+    const cZh = r.json.cell.id
+    await postJson(srv.origin, "/nb2/cell/run", { sid: SID, cellId: cZh })
+    const stZh = await getJson(srv.origin, `/nb2/state?sid=${SID}`)
+    const cellZh = findCell(stZh.json, cZh)
+    const textZh = (cellZh.outputs.find((o) => o.kind === "stream") || {}).text || ""
+    check("中文关键字参数不报语法错误（GBK 回归）", cellZh.status === "ok", `status=${cellZh.status} outs=${cellZh.outputs.length}`)
+    check("中文输出未被打成乱码", textZh.includes("宽 = 1"), JSON.stringify(textZh.trim()))
+
     // ── 4. 中断 ──
     r = await postJson(srv.origin, "/nb2/cell/add", { sid: SID, source: "import time\ntime.sleep(30)\nprint('never')" })
     const c4 = r.json.cell.id
@@ -220,6 +244,64 @@ async function main() {
     const c4state = findCell(st4.json, c4)
     check("中断后不再 running", c4state.status !== "running", `status=${c4state.status} after ${Date.now() - tInt}ms`)
     check("中断后没有在跑的 cell", st4.json.running === null, `running=${st4.json.running}`)
+
+    // ── 4c. 跑着跑着内核进程死了：那格必须收尾成 error，不许留 running ──
+    /**
+     * 事故的第二个 bug：宿主只看到 sidecar 退出、自动重启，谁也没把「在跑的那格」
+     * 收尾。UI 上是「内核 idle + 零输出 + 零报错 + 那格一直转」——用户无法判断跑没跑。
+     */
+    r = await postJson(srv.origin, "/nb2/cell/add", { sid: SID, source: "import time\ntime.sleep(60)" })
+    const cKill = r.json.cell.id
+    postJson(srv.origin, "/nb2/cell/run", { sid: SID, cellId: cKill }).catch(() => {})
+    // 轮询到真的开跑（冷启动/上一格刚被中断都可能让 started 晚到，别用固定 sleep）
+    let stK = null
+    for (let i = 0; i < 60; i += 1) {
+      stK = await getJson(srv.origin, `/nb2/state?sid=${SID}`)
+      const c = findCell(stK.json, cKill)
+      if (c && c.status === "running") break
+      await sleep(150)
+    }
+    const beforeKill = findCell(stK.json, cKill)
+    check("崩溃前该格确实在跑", beforeKill.status === "running" && stK.json.running === cKill, `status=${beforeKill.status}`)
+    const killPid = stK.json.sidecar && stK.json.sidecar.pid
+    check("拿得到 sidecar pid", Number(killPid) > 0, `pid=${killPid}`)
+    if (killPid) {
+      try {
+        if (process.platform === "win32") execFileSync("taskkill", ["/pid", String(killPid), "/T", "/F"])
+        else process.kill(-killPid, "SIGKILL")
+      } catch (err) {
+        console.log(`  ! 杀进程失败：${err && err.message}`)
+      }
+    }
+    let stK2 = null
+    for (let i = 0; i < 60; i += 1) {
+      stK2 = await getJson(srv.origin, `/nb2/state?sid=${SID}`)
+      const c = findCell(stK2.json, cKill)
+      if (c && c.status === "error") break
+      await sleep(150)
+    }
+    const afterKill = findCell(stK2.json, cKill)
+    const killErrBlock = afterKill.outputs.find((o) => o.kind === "error")
+    check("内核崩掉后该格收敛成 error", afterKill.status === "error", `status=${afterKill.status}`)
+    check("留下 KernelDied 错误块（不是静默）", !!killErrBlock && killErrBlock.ename === "KernelDied", killErrBlock && killErrBlock.ename)
+    check("不留悬空的 running", stK2.json.running === null, `running=${stK2.json.running}`)
+    // 崩后宿主会自动重启内核：等它真的能跑，后面的用例才有意义
+    const pingAdd = await postJson(srv.origin, "/nb2/cell/add", { sid: SID, source: "print('alive')" })
+    const cPing = pingAdd.json.cell && pingAdd.json.cell.id
+    let recovered = false
+    for (let i = 0; i < 80 && cPing; i += 1) {
+      try {
+        const rr = await postJson(srv.origin, "/nb2/cell/run", { sid: SID, cellId: cPing })
+        if (rr.json.ok && rr.json.done && rr.json.done.status === "ok") {
+          recovered = true
+          break
+        }
+      } catch {
+        /* 内核还没起来：继续等 */
+      }
+      await sleep(300)
+    }
+    check("崩溃后内核自动重启并能继续执行", recovered)
 
     // ── 5. 重启三语义 ──
     await postJson(srv.origin, "/nb2/cell/run", { sid: SID, cellId: c1 })

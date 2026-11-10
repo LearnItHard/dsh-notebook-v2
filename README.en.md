@@ -73,6 +73,12 @@ Timeouts and failures stay silent.
 accept (`Mod-↵`) / accept & run / retry / reject (`Esc`). Uses the host's `ctx.llm.stream()`; provider/model
 come from `config.ai` and are auto-resolved when left empty.
 
+**💬 Hand to chat**: inline AI only sees this cell + neighbours + variables/error summary, so
+changes that need **project** context go to the main agent instead. "💬 Hand to chat" on the AI bar,
+"💬 Edit in chat" on the selection bar, and "💬 Let chat edit this cell" in the context menu compose a
+prompt — path · cell index · line range · current code · context · your instruction · the `nb_*` recipe —
+and push it straight into the conversation composer (same channel backs "💬 Add to chat").
+
 **Kernel**: persistent, variables live across cells; Interrupt / Restart / Restart-and-clear /
 Restart-and-run-all; switch conda envs and change the working directory from the toolbar (both restart the kernel).
 

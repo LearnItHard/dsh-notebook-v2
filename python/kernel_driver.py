@@ -55,6 +55,35 @@ def log(msg):
         pass
 
 
+def force_utf8_stdio():
+    """协议两端一律 UTF-8，**不看系统代码页**。
+
+    真机 bug（2026-11-10，用户报「点了运行什么都没发生」）：
+    `python -u` 从管道拿到的 stdin/stdout 用 locale 编码（本机 cp936/GBK），而宿主写的是
+    UTF-8。于是
+
+      1. 中文源码被 GBK + surrogateescape 解坏，进内核后变成 U+FFFD →
+         `SyntaxError: invalid character '\ufffd'`（中文出现在关键字参数、变量名这些
+         语法位置上时必炸；出现在字符串里则静默变成乱码输出）；
+      2. 报错帧里带 U+FFFD，GBK 编不出来 → Emitter 的兜底 punish 成 os._exit(1)
+         → 内核进程当场死掉；
+      3. 宿主只看到 sidecar 退出、自动重启，没人把「在跑的那格」标成失败
+         → UI 显示 idle、无输出、无报错，格子永远卡在 running。
+
+    修法就是这一行：stdin 解不了就用 replace（坏帧交给 json.loads 去拒），
+    stdout 编不了就用 backslashreplace（宁可难看，绝不以死兜底）。
+    """
+    for name, errors in (("stdin", "replace"), ("stdout", "backslashreplace"), ("stderr", "backslashreplace")):
+        stream = getattr(sys, name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors=errors)
+        except Exception as exc:  # 老 python / 已包装过的流：host 侧的 env 兜底
+            log("reconfigure %s failed: %r" % (name, exc))
+
+
 def dumps(obj):
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
@@ -65,6 +94,31 @@ class Emitter:
     def __init__(self):
         self._lock = threading.Lock()
         self._seq = 0
+
+    def _write(self, frame):
+        """写一帧。**只有真正的管道断了才退出**，编码错误降级重发。
+
+        旧写法把所有异常都当「宿主没了」→ os._exit(1)。结果一条含 U+FFFD 的错误事件
+        就能把整个内核打死（见 force_utf8_stdio 的注释）。管道断（EPIPE）才是真的该退。
+        """
+        line = dumps(frame) + "\n"
+        try:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            return True
+        except UnicodeEncodeError as exc:
+            # 走到这里说明 reconfigure 没生效（老解释器/流被包过）。ASCII 转义一定能写出去。
+            log("stdout encode fallback (%r)" % (exc,))
+            try:
+                sys.stdout.write(json.dumps(frame, ensure_ascii=True, separators=(",", ":")) + "\n")
+                sys.stdout.flush()
+                return True
+            except Exception as exc2:
+                log("stdout write failed after fallback: %r" % (exc2,))
+                os._exit(1)
+        except Exception as exc:  # stdout 断了 = 宿主没了，尽快退出
+            log("stdout write failed: %r" % (exc,))
+            os._exit(1)
 
     def emit(self, name, payload=None, msg_id=None, reply_to=None, extra=None):
         self._seq += 1
@@ -83,12 +137,7 @@ class Emitter:
         if extra:
             frame.update(extra)
         with self._lock:
-            try:
-                sys.stdout.write(dumps(frame) + "\n")
-                sys.stdout.flush()
-            except Exception as exc:  # stdout 断了 = 宿主没了，尽快退出
-                log("stdout write failed: %r" % (exc,))
-                os._exit(1)
+            self._write(frame)
 
     def ack(self, req_id, payload=None):
         self.emit_control("ack", req_id, payload)
@@ -106,8 +155,7 @@ class Emitter:
             "payload": payload or {},
         }
         with self._lock:
-            sys.stdout.write(dumps(frame) + "\n")
-            sys.stdout.flush()
+            self._write(frame)
 
     def ready(self, payload):
         self.emit_control("ready", None, payload)
@@ -275,8 +323,41 @@ class KernelRunner:
             log("bootstrap failed: %r" % (exc,))
 
     def interrupt(self):
-        if self.km:
+        """请求中断；Windows 上不生效时降级为重启内核。
+
+        ⚠️ 实测事实（2026-11-10，本机 ipykernel 7.2.0 + jupyter_client 8.8.0）：
+        `km.interrupt_kernel()`（内部走 SetEvent 的 win32_interrupt_event）**不会**
+        真的打断正在跑的 `time.sleep(20)`；直接 `send_interrupt(handle)` 也没反应。
+        用户点「■ 中断」看到状态变成「已取消」，内核却还在跑，后面每一格都在排队 ——
+        这又是一条「点了运行，什么都不发生」的来源。
+
+        所以做两级：先按官方方式请求；1.5s 内没收敛就重启内核（restart 会把
+        live_cells 收尾成 cancelled）。代价是变量丢失，日志里写明，别装作没发生。
+        """
+        if not self.km:
+            return
+        try:
             self.km.interrupt_kernel()
+        except Exception as exc:
+            log("interrupt_kernel failed: %r" % (exc,))
+        deadline = time.time() + 1.5
+        while time.time() < deadline:
+            # 主循环被这次调用占住了，必须自己泵消息，否则 live_cells 永远不会清空
+            try:
+                self.pump()
+            except Exception as exc:
+                log("pump during interrupt failed: %r" % (exc,))
+            if not self.live_cells:
+                return
+            time.sleep(0.05)
+        if not self.live_cells:
+            return
+        log("interrupt 未生效（win32 interrupt event 没反应），降级为重启内核（变量会丢）")
+        self.emitter.emit("kernel.state", {"state": "starting", "reason": "interrupt-escalated"})
+        try:
+            self.restart(now=True)
+        except Exception as exc:
+            log("interrupt escalation failed: %r" % (exc,))
 
     def restart(self, now=True):
         if not self.km:
@@ -678,6 +759,8 @@ def strip_ansi(text):
 
 
 def main(argv=None):
+    # ⚠️ 必须在读 stdin / 写 stdout 之前。见 force_utf8_stdio 的注释。
+    force_utf8_stdio()
     parser = argparse.ArgumentParser()
     parser.add_argument("--echo", action="store_true", help="只跑协议，不启内核")
     parser.add_argument("--cwd", default=None, help="内核工作目录")
@@ -687,6 +770,15 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     emitter = Emitter()
+    # 排障用：这两行能一眼看出「协议两端是不是 UTF-8」，比复现一次崩溃快得多
+    log(
+        "stdio encoding: stdin=%s stdout=%s stderr=%s (utf-8 forced)"
+        % (
+            getattr(sys.stdin, "encoding", None),
+            getattr(sys.stdout, "encoding", None),
+            getattr(sys.stderr, "encoding", None),
+        )
+    )
     cmd_queue = queue.Queue()
     t = threading.Thread(target=stdin_reader, args=(cmd_queue,), daemon=True)
     t.start()

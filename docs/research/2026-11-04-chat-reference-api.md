@@ -1,5 +1,11 @@
 # 对话输入框投递 API 调研（RC.5：reference chip / inputActions / 替代通路）
 
+> ⚠️ **本文结论已被实测推翻，先读 [`2026-11-06-chat-delivery-实测.md`](./2026-11-06-chat-delivery-实测.md)。**
+> 关键更正：0.2.1-rc.5 **没有 `conversation` 这个 client service**，所以本文推荐的
+> 「`conversation` + `slash/input-insert-reference`」路线在本版从未打通；
+> 真正可用的是 slot props 的 `inputActions.captureInsertion()` + `insertText(text, span)`。
+> 本文保留作历史记录（里面的 asar 行号与芯片渲染细节仍然有效）。
+
 - 调研日期：2026-11-04
 - 目标 DSH：`E:\Users\asus\AppData\Local\Programs\DeepSeek Harness\resources\app.asar`
 - 只读调研：除本文件外未改动任何生产代码

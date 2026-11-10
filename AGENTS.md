@@ -71,6 +71,40 @@ python-env 插件里选的那个解释器，于是回落到 PATH 上的系统 py
 
 ## 关键实现约定（踩过的坑，别改）
 
+- **协议两端必须强制 UTF-8，绝不能吃系统代码页**（2026-11-10 真机事故，用户报「点了运行，
+  代码没运行」）：Windows 下 `python -u` 从管道拿到的 stdio 是 **cp936/GBK**，宿主写的是
+  UTF-8。于是 ① 中文源码被 GBK + `surrogateescape` 解坏，进内核变成 U+FFFD →
+  `SyntaxError: invalid character`（中文一旦出现在关键字参数、变量名这类语法位置就必炸；
+  在字符串里则静默变成乱码输出）；② 含 U+FFFD 的报错帧 GBK 编不出来，`Emitter` 原来
+  `except → os._exit(1)`，**内核进程当场被打死**；③ 宿主只看到 sidecar 退出、自动重启，
+  没人收尾 → UI 上「内核 idle + 零输出 + 零报错 + 那格一直转」。修法是三处一起：
+  `kernel_driver.force_utf8_stdio()`（stdin `replace` / stdout `backslashreplace`）、
+  `sidecar.spawn(env: PYTHONIOENCODING/PYTHONUTF8)`、`Emitter._write` 只对**管道断**才退出。
+  回归用例：`test/kernel.mjs` 的「中文关键字参数不报语法错误」。
+- **内核进程死了，正在跑的那一格必须当场收尾**（同一事故的第二个 bug）：
+  `_onExit` 只重启不收敛 = 那格永远 `running`，`pump()` 的闸门永久关闭，后面每格都排队不动。
+  `index.js` 里 `abortInflight()` 专门干这件事：先确保落在 `running`（状态机只允许
+  `running → error`），再 `error` → `cell.done`，并把队列清成 idle + 把驱动 stderr 塞进
+  `KernelDied` 的 evalue（那是用户唯一能看到的「为什么」）。
+- **`inflight` 是闸门，必须处处有出清路径**：它记录「已 post execute、还没等到
+  `cell.started`」的格。中断/丢帧会让这个格**永远收不到任何事件** → `pump()` 永久 return
+  → 「点运行没反应且不报错」。现在四处清：`cell.started`、`cell.done`、`interrupt()`、
+  `abortInflight()`，外加 `KERNEL_START_TIMEOUT_MS`（15s）兜底成 `KernelTimeout`。
+- **崩溃后重新起内核要走 `sidecar.whenAlive()`，不能直接 `ensureSidecar()` 再 spawn**：
+  `sidecarReady` 缓存的是一个**已经 resolve 过的死实例**，照旧返回会让 pump 无限重试
+  （CPU 打满、界面卡死）。`whenAlive()` 分三种：活着给自己、重启中给那次重启的 promise、
+  彻底没了给 null（宿主据此重建）。
+- **Windows 上 ipykernel 的「中断」可能根本不生效**（2026-11-10 实测：ipykernel 7.2.0 +
+  jupyter_client 8.8.0，`km.interrupt_kernel()` 与直接 `SetEvent(win32_interrupt_event)`
+  都对 `time.sleep(20)` 无效）。所以 `KernelRunner.interrupt()` 做两级：先请求，1.5s 观察窗
+  （期间必须自己 `pump()`，否则 live_cells 永远不清空）内没收敛就降级成**重启内核**，
+  日志写明变量会丢。宁可重来，也不要留一个「看起来取消了、其实还在跑」的内核。
+- **运行状态必须有可判读的显示**（用户 2026-11-10：「代码运行的时候我不知道有没有运行」）：
+  左槽 `◐` 用 CSS 转 + 黄条 + 淡黄底，外加「已跑 N 秒」；工具栏第三行最左是
+  「运行中 · 第 N 格 · 12s · 队列 2 / 空闲」。计时起点是**服务端**写进 `cell.startedAt`
+  的时间戳（`cell.started` 的 `at`），不是客户端 `Date.now()` —— 右栏切走/重连会重新拉
+  `/nb2/state`，本地时间戳一刷新计时器就倒退。
+
 - **快捷键只认「命令注册表 + 键位表」，不要在 UI 里另写闭包**（2026-11-04 重构，用户提议）：
   `COMMANDS`（命令 id → label/hint）、`KEYBINDINGS`（键 → 命令 id）、`commandsRef.current`
   （命令 id → 执行体，每帧重建）三层。右键菜单/快捷键都从这三张表取，所以不会出现
@@ -93,8 +127,37 @@ python-env 插件里选的那个解释器，于是回落到 PATH 上的系统 py
 - **重连要认两个游标**：`?after=` 与 `Last-Event-ID` 取最大。
 - **ipykernel 的 `OutStream.flush_interval` 默认 0.2s**：不改它输出就是每 200ms 跳一批（sidecar 的 `_bootstrap` 改成 0.02s）。
 - **非 stream 输出前必须 flush 该 cell 的 stream 缓冲**，否则 UI 上「结果先出现、打印后出现」。
+- **重跑一个 cell 必须先清空它上一轮的输出**：宿主 `notebook._onStarted` 与客户端
+  `reduceEvent` 的 `cell.started` **两处都要清**（`lastStream` 一起清）。这是 Jupyter / VS Code
+  的语义；不清的话每跑一次就把新输出接在旧输出后面，用户看到同一格三四份重复的 DataFrame
+  和 print。客户端那份是「只靠 SSE 更新的本地快照」，只改宿主的话得刷新页面才恢复。
+- **HTML 输出走沙箱 iframe，宿主的 CSS 变量进不去**：`body{color:inherit}` 在 iframe 里等于
+  取初始值（深色主题下就是黑字压深底，等于看不见）。所以 srcdoc 里要写**算好的具体前景色**
+  （`getComputedStyle(document.body).color`），派生色一律
+  `color-mix(in srgb, currentColor N%, transparent)`，明暗两套主题自动跟随。
+- **表格样式照 JupyterLab 的 `.jp-RenderedHTMLCommon table`**：无竖线、表头只有一条下横线、
+  `tbody tr` 斑马纹 + hover、数值右对齐、`font-variant-numeric: tabular-nums`。pandas 的
+  `_repr_html_` 自带 `<table border="1">`（浏览器按属性画粗黑网格）和 `<style scoped>`
+  （`.dataframe thead th{text-align:right}`），所以必须显式 `border:0`，且自定义规则的选择器
+  要比它**更具体**（`table.dataframe thead th` 压 `.dataframe thead th`），否则对齐不受控。
+- **stream / traceback 里的 ANSI 要解析成 span**（`parseAnsi` → `ansiNodes`；色板参考
+  JupyterLab 的 `.ansi-*-fg`，但一律 `color-mix(..., currentColor)`，免得在另一套主题下
+  变成隐形色）。折叠**前**先 `stripAnsi`，否则会切在转义序列中间，屏幕上留下 `[31` 残渣。
+- **MIME 优先级表里只放真有渲染分支的 mime**：放了 `application/vnd.jupyter.widget-view+json`
+  这类没有渲染器的项，`pickMime` 选中后会掉进纯文本兜底，用户看到的是一大坨 JSON（图没了）。
 - **另存为要迁移标签 key**，否则同一份 `.ipynb` 会被开出两个标签。
 - **取消 AI 生成不能写成 done**，否则前端会把半截代码当成品。
+- **ghost 的 `StateField.update` 必须先看 `tr.effects`，再看 `tr.docChanged`**：分级接受（按词 / 按行）
+  的事务同时带 `changes`（插入这一小段）和 `setGhost`（剩余建议挪到新位置）。若先判 docChanged
+  就 `return null`，剩下的建议被直接丢掉 —— 表现是「按词接受只吃一个词、后面全没」，而且**不报错**，
+  只有真机连按两次才发现（`acceptWord` 就这样半残了很久）。正常打字的事务没有 effect，
+  所以这个顺序调换不会让「一打字幽灵就作废」失效。
+- **补全的缓存要做「最长前缀匹配」，不能只做精确匹配**：key 是 `pos\0doc` 的精确匹配只能救
+  「退格又打回来」；用户**继续往下打**（`df.he` → `df.hea`）时文档已变，精确匹配必然落空，
+  于是每多敲一个字都要重付一次网络往返。规则：`doc` 是缓存 key 的前缀、且用户多敲的字符
+  正是缓存建议的开头 → 返回切掉已打部分的剩余建议（Continue `AutocompleteLruCache` 同款）。
+- **补全的设置项（防抖 / 最大行数）必须 `getOptions()` 现读**：CM 编辑器只在挂载时建一次扩展，
+  把值闭包进 `buildGhostExtension` 就变成「改设置要刷新页面才生效」（用户明确要求改完立即生效）。
 - CM 主题只写 `var(--dsw-alias-*)`，**不要**引入 oneDark 这类硬编码主题。
 - **浮层的退出不能只靠浮层自己的 `onKeyDown`**：picker 的目录行是普通 `div`（不可聚焦），
   点一下焦点就掉到 `<body>`，此后浮层根节点收不到任何按键 —— 用户看到的就是「钻了目录之后 Esc 关不掉」。
@@ -106,10 +169,18 @@ python-env 插件里选的那个解释器，于是回落到 PATH 上的系统 py
   兜底必须同时满足三条：① 最近一次 `mousedown` 在面板内（否则会抢左侧对话的键）；
   ② 事件落点不在面板内（否则与面板内分发重复执行、一次按键跑两遍格）；
   ③ 面板在屏幕上（`getBoundingClientRect` 非零，防止右栏切走后后台抢键）。
-- **对话投递只能走 `ctx.sessions.scope(sid)` + `ctx.get("conversation").input.for(actx)`**：
-  slot props 的 `inputActions` 公开只有 8 个方法（没有 `appendDraft`/`insertReference`），
-  `setDraft` 是整体替换、会吃掉用户已打的字。失败提示必须分层写明断在哪一层。
-  细节见 `docs/research/2026-11-04-chat-reference-api.md`。
+- **对话投递走 slot props 的 `inputActions`（2026-11-06 实测修正）**：
+  `props.inputActions.captureInsertion()` 给 `{start,end,draftRev}`，`insertText(text, span)`
+  真的把字插进 Lexical 编辑器；被拒（rev 竞态）重试一次。**本版没有 `conversation` 这个
+  client service**，`ctx.get("conversation")` 恒为 undefined —— 老的「会话桥」永远拿不到，
+  只保留作前向兼容。另外**必须** `ctx.get("sessions")`，写 `ctx.sessions` 会被门面抛异常
+  （未在静态 `inject` 里声明）。失败提示必须分层写明断在哪一层
+  （`no-actions` / `no-insertText`（带实际方法清单）/ `insertText-refused` / 剪贴板）。
+  细节见 `docs/research/2026-11-06-chat-delivery-实测.md`。
+- **需要项目上下文的改写一律走「交给对话」而不是内联 AI**：内联 AI 只看得到本格 + 邻格 +
+  变量/报错摘要。`buildChatPrompt()` 把位置 / 代码 / 上下文 / 要求 / `nb_*` 动手方式拼成
+  提示词投进主对话，由有完整工作区的 agent 去改（用户 2026-11-06 的明确要求）。
+  入口三个：AI 条「💬 交给对话」/ 选区条「💬 在对话里改」/ 右键「💬 让对话改本格」。
 
 ## 重新打 CM6 vendor
 

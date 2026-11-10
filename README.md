@@ -44,7 +44,7 @@ node scripts/install.mjs
 | 标签条 | 多 notebook 标签 · ＋打开（内联路径输入） · ＋新建 |
 
 **单元格类型**：`代码` / `Markdown` / `Shell` / `Raw`（每格左侧下拉切换）。
-Markdown 默认渲染、点一下进编辑；Shell 走**独立子进程**（`cmd` / `bash` / `pwsh` 自动选，不需要 Python 内核）。
+Markdown / Raw 默认渲染预览、**双击**进编辑（单击只选中本格）；Shell 走**独立子进程**（`cmd` / `bash` / `pwsh` 自动选，不需要 Python 内核）。
 `.ipynb` 里 Shell 格就是标准 Jupyter 写法「带 `%%bash` 魔法行的 code 格」，在 JupyterLab / VS Code 里仍合法。
 
 **输出**：`print` 一行一行往外冒（`print` 一万行只产生**一个**输出块）；
@@ -65,6 +65,11 @@ markdown（表格/公式/代码块/引用）；超长输出「头 300 + 尾 100 
 **AI 内联改写（`Mod-K`）**：指令 → 逐 token 流式 → **行级 diff** 评审（`+N −M`）→
 接受（`Mod-↵`）/ 接受并运行 / 重试 / 拒绝（`Esc`）。后端走宿主 `ctx.llm.stream()`，
 provider/model 来自 `config.ai`，留空自动解析。
+
+**💬 交给对话**：内联 AI 只看得到本格 + 邻格 + 变量/报错摘要，看**项目**的改写交给主对话 agent。
+AI 条上的「💬 交给对话」/ 选区条「💬 在对话里改」/ 右键「💬 让对话改本格」会把
+**文件路径 · Cell 序号 · 行范围 · 当前代码 · 上下文 · 你的要求 · `nb_*` 动手方式**拼成提示词，
+直接投进左侧对话输入框（同一套通道也支撑右键的「💬 添加到对话」）。
 
 **内核**：常驻、变量跨格保留；Interrupt / Restart / RestartAndClear / RestartAndRunAll 四语义；
 内核下拉换 conda 环境、工作目录可改（都会重启内核）。

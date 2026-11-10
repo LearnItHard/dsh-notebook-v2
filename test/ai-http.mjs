@@ -190,6 +190,12 @@ try {
           prefix: "import pandas as pd\ndf = pd.re",
           suffix: "\nprint(df)",
           timeoutMs: 4000,
+          // 跨格上下文 v2：markdown 意图 + 代码格；debug 让宿主回显真正拼出来的提示词
+          context: [
+            { source: "# 数据清洗 — 去掉缺失值", kind: "markdown" },
+            { source: "import pandas as pd", kind: "code" },
+          ],
+          debug: true,
         }),
       })
       const json = await res.json()
@@ -206,6 +212,36 @@ try {
       check("ghost 提示词里带了光标前的代码", /pd\.re/.test(userMsg))
       check("ghost 提示词里带了光标后的代码（有 suffix 时）", /print\(df\)/.test(userMsg))
       check("ghost 没有退化成改写整格", !/Return the complete/i.test(userMsg))
+
+      // #14 输出预算：宿主默认给 150 token + 三个 stop 序列，直接交给 llm.stream
+      check(
+        "宿主把输出预算交给 llm（maxTokens=150 / stop 序列）",
+        ghostLlm.lastOpts.maxTokens === 150 && Array.isArray(ghostLlm.lastOpts.stop) && ghostLlm.lastOpts.stop[0] === "\n\n\n",
+        JSON.stringify({ maxTokens: ghostLlm.lastOpts.maxTokens, stop: ghostLlm.lastOpts.stop }),
+      )
+      // #8 验收①：markdown 章节意图真的进了提示词（后端 debug 回显可核对）
+      const debugText = JSON.stringify(json.debug || {})
+      check("debug 回显真正的提示词（含 markdown 章节意图）", debugText.includes("Notebook section intent") && debugText.includes("数据清洗"), debugText.slice(0, 140))
+      check("debug 回显上下文计数与字符数", !!json.debug && json.debug.context === 2 && json.debug.contextChars > 0, debugText.slice(0, 80))
+
+      // 上下文硬上限：客户端按预算裁，宿主只兜一道 12
+      const many = Array.from({ length: 20 }, (_, i) => ({ source: `x${i} = ${i}`, kind: "code" }))
+      const res2 = await fetch(srv3.origin + "/nb2/ai/complete", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prefix: "x = 1", context: many, debug: true, timeoutMs: 4000 }),
+      })
+      const json2 = await res2.json()
+      check("宿主上下文硬上限 12（预算由客户端裁）", !!json2.debug && json2.debug.context === 12, JSON.stringify(json2.debug && json2.debug.context))
+
+      // 正常请求不回显提示词：用户代码不再往网络/日志多送一份
+      const res3 = await fetch(srv3.origin + "/nb2/ai/complete", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prefix: "x = 1", timeoutMs: 4000 }),
+      })
+      const json3 = await res3.json()
+      check("不要求 debug 时不回显提示词", json3.debug === undefined && typeof json3.suggestion === "string", JSON.stringify(Object.keys(json3)))
     } finally {
       await srv3.close()
     }
