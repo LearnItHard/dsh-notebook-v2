@@ -2,6 +2,31 @@
 
 版本号在 `package.json`；`/nb2/health` 的 `version` 直接读它（不再硬编码）。
 
+## 0.2.1 · 2026-11-11
+
+### 新增
+
+- **`notebook-edit` skill**：把「改这一格」的操作流程（`nb_open` → `nb_get` → `nb_edit_cell`、
+  只动一格、报错用 `nb_error_context`）从每条对话消息里搬进 skill。面板投递现在只发
+  `@文件 (Cell[n])` + `/notebook-edit <要求>` + 选区 + 一行报错，输入框不再被撑成一堵墙。
+  源在 `skills/notebook-edit/SKILL.md`，`node scripts/install-skill.mjs` 同步到 `~/.dsh/skills/`。
+- **`/nb2/spill`**：大块输出落盘后可以读回渲染（图片直接显示，其它给「打开」链接），
+  不再只显示一行「大块输出已折叠」。只允许读 spill 目录内的文件（越界 403）。
+- **`/nb2/kernels` 返回 `resolved`**：没显式选内核时，下拉显示「默认：<环境名>」，
+  状态条写「内核未启动 · 默认 xxx」；连默认都没有才显示红色「⚠ 选内核」。
+
+### 修复
+
+- **matplotlib / PIL 的图不显示，只看到「大块输出已折叠 …/nb2-xxxx.bin」**：图片的内联阈值
+  从 256KB（所有 mime 共用）提到 6MB 单独判断；真超限落盘后前端用 `/nb2/spill` 读回，
+  不再退化成一行文字。落盘目录从随机 `mkstemp` 改成固定的 `%TEMP%\dsh-nb2-spill`，
+  文件名带扩展名，启动时清理 24h 前的文件。
+- **落盘块显示 `0KB`**：`bytes` 在宿主转发 `display` 事件时被漏掉，现在一并转发。
+- **打开 notebook 停在中间的某个格子**：滚动锚点跨 notebook 复用上一本的 `scrollTop`，
+  且初始 `pinned: true` 会滚到底。现在按 notebook 路径记 `{top, cellId}`，有记录回到上次位置，
+  没记录回第一格顶部。
+- **没选内核时不知道能不能跑**：见上面的 `resolved`。
+
 ## 0.2.0 · 2026-11-10
 
 ### 输出可视化

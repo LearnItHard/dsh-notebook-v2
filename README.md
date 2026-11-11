@@ -5,7 +5,7 @@
 给 **DeepSeek Harness** 用的自研 Jupyter 前端插件：右栏里一个真正的 notebook ——
 常驻内核、**流式输出**、多标签、`.ipynb` 语义等价读写、**内联 AI 改写与补全**、VS Code 手感。
 
-`MIT` · `v0.2.0` · `Node ≥ 20` · `DSH Desktop 0.2.1-rc.x`
+`MIT` · `v0.2.1` · `Node ≥ 20` · `DSH Desktop 0.2.1-rc.x`
 
 ## 截图
 

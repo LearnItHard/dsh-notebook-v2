@@ -32,7 +32,7 @@ M0 只实现前三个；后两个是 M1 的形状，**路径与语义先定死**
 
 ```json
 {
-  "ok": true, "pkg": "dsh-notebook-v2", "version": "0.2.0",
+  "ok": true, "pkg": "dsh-notebook-v2", "version": "0.2.1",
   "uptimeMs": 12345, "logCap": 2000, "heartbeatMs": 15000,
   "sessions": [{ "sid": "...", "seq": 42, "minSeq": 1, "log": 42, "clients": 1 }]
 }
@@ -133,7 +133,8 @@ SSE 连续失败 → 客户端退化为 `2s` 轮询 `GET /nb2/state?sid=`，**UI
 
 | 方法 | 路径 | 用途 | 返回 |
 |---|---|---|---|
-| GET | `/nb2/kernels?sid=` | conda 环境候选（含 `hasIpykernel`）+ 当前选择 + cwd | JSON |
+| GET | `/nb2/kernels?sid=` | conda 环境候选（含 `hasIpykernel`）+ 当前选择 + **`resolved`（没显式选时会用谁）** + cwd | JSON |
+| GET | `/nb2/spill?path=` | 读回落盘的大块输出（图片/HTML）。**只允许 spill 目录内的文件**，越界 403 | 二进制（按扩展名给 Content-Type） |
 | POST | `/nb2/kernel/select` | `{kernelId}` 换内核（**会重启内核并清空输出**） | JSON |
 | POST | `/nb2/notebook/setCwd` | `{dir}` 改内核工作目录（**会重启内核**） | JSON |
 | POST | `/nb2/notebook/saveAs` | `{path}` 另存为并把标签 key 迁到新路径 | JSON |

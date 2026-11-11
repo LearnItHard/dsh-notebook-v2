@@ -39,8 +39,17 @@ STREAM_BATCH_MS = 20
 # 主循环在空闲时等命令的粒度。它同时是"输出泵"的最坏延迟，
 # 所以不能用 100ms —— 那会把每次 flush 人为推后最多 100ms。
 CMD_POLL_MS = 0.01
-# 单张图超过它就落盘，帧里只给路径（避免 8MB 单帧上限）
-IMAGE_INLINE_LIMIT = 256 * 1024
+# 单条输出超过它就落盘（避免 8MB 单帧上限）。
+# 图片阈值单独放大：matplotlib 一张 300dpi PNG 的 base64 常有三四百 KB，
+# 用 256KB 一刀切会把**正常能渲染的图**也赶去落盘，用户看到的是一行
+# 「大块输出已折叠 /tmp/nb2-xxxx.bin」，图没了（2026-11-11 真机）。
+INLINE_LIMIT_TEXT = 256 * 1024
+INLINE_LIMIT_IMAGE = 6 * 1024 * 1024
+# 落盘目录：宿主通过 --spill-dir 传（默认系统 temp 下的固定子目录）。
+# **不放工作区**：这是 base64 解码出来的中间产物，不是用户资产；每跑一次图就多一个文件，
+# 工作区会被临时文件淹没，还会被 git 看到。放在 DSH 自己的缓存目录里，配可读回端点 + 定期清理。
+SPILL_DIR = os.path.join(tempfile.gettempdir(), "dsh-nb2-spill")
+_spill_seq = 0
 # 每 cell 输出上限
 CELL_MAX_CHARS = 50 * 1024 * 1024
 CELL_MAX_LINES = 200000
@@ -53,6 +62,39 @@ def log(msg):
         sys.stderr.flush()
     except Exception:
         pass
+
+
+def spill_write(mime, value):
+    """把超过内联阈值的输出写进 SPILL_DIR，返回 (绝对路径, 原始字节数)。
+
+    文件名带真实扩展名（.png/.svg/.txt…），用户在资源管理器里能认出来；
+    宿主用 `/nb2/spill` 端点把它读回去渲染，前端不再只显示一行路径。
+    """
+    global _spill_seq
+    os.makedirs(SPILL_DIR, exist_ok=True)
+    ext = ".bin"
+    raw = value.encode("utf-8")
+    if mime.startswith("image/") and mime != "image/svg+xml":
+        try:
+            raw = base64.b64decode(value)
+        except Exception:
+            raw = value.encode("utf-8")
+        ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}.get(mime, ".img")
+    elif mime == "image/svg+xml":
+        ext = ".svg"
+    elif mime == "text/html":
+        ext = ".html"
+    elif mime == "application/json":
+        ext = ".json"
+    elif mime.startswith("text/"):
+        ext = ".txt"
+    _spill_seq += 1
+    # 进程 id + 毫秒 + 序号：同一进程里连续两次生图也不会撞名
+    name = "nb2-%d-%d-%d%s" % (os.getpid(), int(time.time() * 1000), _spill_seq, ext)
+    path = os.path.join(SPILL_DIR, name)
+    with open(path, "wb") as fh:
+        fh.write(raw)
+    return path, len(raw)
 
 
 def force_utf8_stdio():
@@ -723,19 +765,15 @@ class KernelRunner:
                 payload["update"] = True
             if display_id:
                 payload["displayId"] = display_id
-            if isinstance(value, str) and len(value) > IMAGE_INLINE_LIMIT:
-                # 大块（通常是 base64 图）落盘，帧里只给路径
+            limit = INLINE_LIMIT_IMAGE if mime.startswith("image/") else INLINE_LIMIT_TEXT
+            if isinstance(value, str) and len(value) > limit:
+                # 超大块（通常是几十 MB 的 base64 图）落盘，帧里只给路径 + 原始字节数
                 try:
-                    fd, path = tempfile.mkstemp(prefix="nb2-", suffix=".bin")
-                    with os.fdopen(fd, "wb") as fh:
-                        if mime.startswith("image/") and mime != "image/svg+xml":
-                            fh.write(base64.b64decode(value))
-                        else:
-                            fh.write(value.encode("utf-8"))
-                    payload.update({"kind": "path", "path": path, "bytes": len(value)})
+                    path, raw_bytes = spill_write(mime, value)
+                    payload.update({"kind": "path", "path": path, "bytes": raw_bytes})
                 except Exception as exc:
                     log("spill failed: %r" % (exc,))
-                    payload["data"] = value[:IMAGE_INLINE_LIMIT]
+                    payload["data"] = value[:limit]
                     payload["truncated"] = True
             else:
                 payload["data"] = value
@@ -767,7 +805,12 @@ def main(argv=None):
     parser.add_argument("--kernel-name", default=None, help="kernel spec 名（默认 python3）")
     parser.add_argument("--eager", action="store_true", help="启动即预热内核（宿主默认开启）")
     parser.add_argument("--session", default=None, help="会话 id，仅用于日志")
+    parser.add_argument("--spill-dir", default=None, help="大块输出落盘目录（宿主给 DSH 缓存目录）")
     args = parser.parse_args(argv)
+
+    global SPILL_DIR
+    if args.spill_dir:
+        SPILL_DIR = os.path.abspath(args.spill_dir)
 
     emitter = Emitter()
     # 排障用：这两行能一眼看出「协议两端是不是 UTF-8」，比复现一次崩溃快得多

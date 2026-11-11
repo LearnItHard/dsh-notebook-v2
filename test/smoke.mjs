@@ -254,8 +254,25 @@ async function main() {
   const kernelsRes = await (await fetch(srv.origin + "/nb2/kernels?sid=s1")).json()
   check("A5. /nb2/kernels 返回候选内核与 cwd", Array.isArray(kernelsRes.kernels) && "cwd" in kernelsRes, `kernels=${kernelsRes.kernels.length}`)
   check("A5. 每个候选都带 hasIpykernel 标记", kernelsRes.kernels.every((k) => typeof k.hasIpykernel === "boolean"))
+  /**
+   * 用户 2026-11-11：「没选择内核的时候，应该先提示选择内核，或者一个默认的内核」。
+   * 前端要靠 `resolved` 才能显示「默认：xxx」，所以这条字段不能悄悄消失。
+   */
+  check(
+    "A5. /nb2/kernels 报出「没显式选时会用谁」（resolved.python + source）",
+    !!kernelsRes.resolved &&
+      typeof kernelsRes.resolved.python === "string" &&
+      ["selected", "config", "envsel", "conda", "path"].includes(String(kernelsRes.resolved.source)),
+    JSON.stringify(kernelsRes.resolved),
+  )
   const badKernel = await postJson(srv.origin, "/nb2/kernel/select", { sid: "s1", kernelId: "conda:nope:xxx" })
   check("A5. 选不存在的内核 → 明确报错（不是静默成功）", badKernel.json && /unknown kernel/i.test(String(badKernel.json.error || "")), JSON.stringify(badKernel.json).slice(0, 100))
+  /**
+   * `/nb2/spill` 是唯一一个「query 里的绝对路径直接读文件」的端点，
+   * 只能读 spill 目录内的文件。越界必须 403（不是 404，更不能读出来）。
+   */
+  const spillOut = await fetch(`${srv.origin}/nb2/spill?path=${encodeURIComponent("C:/Windows/win.ini")}`)
+  check("A5. /nb2/spill 拒绝读 spill 目录外的文件", spillOut.status === 403, `status=${spillOut.status}`)
   const badCwd = await postJson(srv.origin, "/nb2/notebook/setCwd", { sid: "s1", dir: "Z:/definitely/not/here" })
   check("A5. 设不存在的目录 → 明确报错", badCwd.json && /目录不存在/.test(String(badCwd.json.error || "")), JSON.stringify(badCwd.json).slice(0, 100))
   const emptyCwd = await postJson(srv.origin, "/nb2/notebook/setCwd", { sid: "s1", dir: "" })

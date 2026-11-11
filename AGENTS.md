@@ -24,7 +24,8 @@ lib/cm-vendor.js      CM6 + KaTeX 的 IIFE 包（构建产物，已提交，使�
 python/kernel_driver.py   sidecar：NDJSON over stdio + jupyter_client 事件泵
 docs/api-nb2.md       /nb2 端点契约
 docs/protocol-ndjson.md  sidecar 协议
-scripts/{install,uninstall,retire-old-plugin,build-cm-vendor}.mjs, scripts/cm-entry.js
+skills/notebook-edit/SKILL.md  对话投递用的 skill（改某一格的流程；用 install-skill 装进 ~/.dsh/skills）
+scripts/{install,uninstall,retire-old-plugin,build-cm-vendor,install-skill}.mjs, scripts/cm-entry.js
 test/{all,smoke,model,python,python-envsel,ai,ai-http,vars,client-logic,smoke-client,kernel,real-app}.mjs
 ```
 
@@ -185,9 +186,15 @@ python-env 插件里选的那个解释器，于是回落到 PATH 上的系统 py
   （`no-actions` / `no-insertText`（带实际方法清单）/ `insertText-refused` / 剪贴板）。
   细节见 `docs/research/2026-11-06-chat-delivery-实测.md`。
 - **需要项目上下文的改写一律走「交给对话」而不是内联 AI**：内联 AI 只看得到本格 + 邻格 +
-  变量/报错摘要。`buildChatPrompt()` 把位置 / 代码 / 上下文 / 要求 / `nb_*` 动手方式拼成
-  提示词投进主对话，由有完整工作区的 agent 去改（用户 2026-11-06 的明确要求）。
+  变量/报错摘要。`buildChatPrompt()` 只投 **`@<文件> (Cell[n])` + `/notebook-edit <要求>` + 选区 +
+  一行报错**（用户 2026-11-11：「要不对话框内太长了」），操作流程在 `skills/notebook-edit/SKILL.md`，
+  由有完整工作区的 agent 按 skill 用 `nb_*` 工具自己读代码再改。
   入口三个：AI 条「💬 交给对话」/ 选区条「💬 在对话里改」/ 右键「💬 让对话改本格」。
+- **大块输出落盘必须可读回**：sidecar 把超过阈值的输出写到 `%TEMP%\dsh-nb2-spill`（可用
+  `DSH_NB2_SPILL` 改），帧里只带 `{kind:"path", path, bytes}`；宿主 `/nb2/spill` 读回渲染，
+  **只允许 spill 目录内的文件**（`withinSubtree` 判越界）。图片内联阈值单独放宽到 6MB，
+  否则一张普通 matplotlib PNG 就会被赶去落盘、用户看到一行「已折叠」而不是图。
+  `bytes` 必须在宿主转发 `display` 事件时一并带上，漏了前端只能显示 0KB。
 
 ## 重新打 CM6 vendor
 

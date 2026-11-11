@@ -759,6 +759,21 @@ console.log("dsh-notebook-v2 · client logic tests\n")
   check("Windows 反斜杠归一成正斜杠", F({ path: "E:\\a\\nb.ipynb", cellIndex: 1 }).rel === "E:/a/nb.ipynb")
   check("空 spec 不抛且给默认名", F(null).label === "notebook.ipynb" && F({}).label === "notebook.ipynb")
 
+  console.log("\n[workspaceRelativeMention：@ 引用用工作区相对路径]")
+  const R = I.workspaceRelativeMention
+  check(
+    "工作区内 → 相对路径",
+    R("E:/ws/a/nb.ipynb", "E:/ws") === "a/nb.ipynb",
+    R("E:/ws/a/nb.ipynb", "E:/ws"),
+  )
+  check("Windows 盘符大小写不敏感", R("E:/WS/A/nb.ipynb", "e:/ws") === "A/nb.ipynb")
+  check("cwd 带尾斜杠也能算", R("E:/ws/a/nb.ipynb", "E:/ws/") === "a/nb.ipynb")
+  check("反斜杠路径也能算", R("E:\\ws\\a\\nb.ipynb", "E:\\ws") === "a/nb.ipynb")
+  check("不在工作区内 → 空串（调用方退回绝对路径）", R("D:/other/nb.ipynb", "E:/ws") === "")
+  check("前缀相同但不是子目录（/ws2）→ 空串", R("E:/ws2/nb.ipynb", "E:/ws") === "")
+  check("缺 path 或 cwd → 空串", R("", "E:/ws") === "" && R("E:/ws/a.ipynb", "") === "")
+  check("POSIX 大小写敏感", R("/ws/A.ipynb", "/ws") === "A.ipynb" && R("/WS/A.ipynb", "/ws") === "")
+
   console.log("\n[对话投递契约]")
   const { readFileSync } = await import("node:fs")
   const src = readFileSync(join(HERE, "..", "lib", "client.js"), "utf8")
@@ -837,10 +852,34 @@ console.log("dsh-notebook-v2 · client logic tests\n")
   console.log("\n[buildChatPrompt：交给对话的提示词]")
   const P = I.buildChatPrompt
   const p1 = P({ path: "E:\\ws\\a\\nb.ipynb", title: "nb.ipynb", cellIndex: 3, source: "print(1)", instruction: "加注释" })
-  check("带位置（路径 + Cell 序号）", p1.includes("E:/ws/a/nb.ipynb") && p1.includes("Cell[3]"))
+  /**
+   * 2026-11-11：用户嫌对话框被撑爆，提示词改成「定位行 + 要求 + 动手方式」。
+   * 整格源码不再贴（agent 有 nb_get），但定位行必须顶格 —— DSH 的输入框/消息渲染
+   * 都以「行首或空白后的 @path」为触发条件，前缀一加文件引用就不渲染了。
+   */
+  check("第一行就是 @路径 定位（顶格，DSH 才认成文件引用）", /^@E:\/ws\/a\/nb\.ipynb \(Cell\[3\]\)$/m.test(p1) && p1.startsWith("@"))
+  check("位置信息只出现一次（不再另起一行「位置：」）", !p1.includes("位置：") && p1.split("Cell[3]").length - 1 === 1)
   check("带用户要求", p1.includes("我的要求：加注释"))
-  check("带代码围栏与标题", p1.includes('```python title="nb.ipynb#Cell[3]"') && p1.includes("print(1)"))
-  check("告诉 agent 走 nb_* 工具（而不是猜文件）", p1.includes('nb_open(path="E:/ws/a/nb.ipynb")') && p1.includes("nb_edit_cell"))
+  check("不贴整格源码（agent 用 nb_get 读，别把输入框撑成一堵墙）", !p1.includes("```") && !p1.includes("print(1)"))
+  /**
+   * 2026-11-11 第二轮：正文再瘦一档，只留「文件引用 + skill + 要求」。
+   * 操作步骤搬进 `notebook-edit` skill（skills/notebook-edit/SKILL.md），
+   * 不再每条消息重复一遍 nb_open → nb_get → nb_edit_cell。
+   */
+  check("正文只给 skill 触发词（操作步骤在 skill 里）", p1.includes("/notebook-edit 改写这一格") && !p1.includes("nb_open(") && !p1.includes("nb_get"))
+  check("正文足够短（第一条消息不含代码、不超过 20 行）", p1.length < 200 && p1.split("\n").length <= 20)
+  /** 有工作区相对路径时：引用行用相对路径（短、点得开）。 */
+  const pRel = P({
+    path: "E:/ws/a/nb.ipynb",
+    mentionPath: "a/nb.ipynb",
+    cellIndex: 3,
+    source: "print(1)",
+  })
+  check(
+    "有 mentionPath 时引用行用相对路径",
+    pRel.startsWith("@a/nb.ipynb (Cell[3])") && pRel.includes("/notebook-edit"),
+    pRel.split("\n")[0],
+  )
   const p2 = P({
     path: "nb.ipynb",
     cellIndex: 2,
@@ -848,7 +887,8 @@ console.log("dsh-notebook-v2 · client logic tests\n")
     selection: { startLine: 1, endLine: 1, text: "b" },
     mode: "rewrite-selection",
   })
-  check("选区模式声明「只改选中行」", p2.includes("只改我选中的那几行") && p2.includes("选中的那几行"))
+  check("选区模式声明「只改选中行」", p2.includes("只改我选中的那几行") && p2.includes("第 2 行："))
+  check("选区代码必须随消息带走（可能还没保存进文件）", p2.includes("```python\nb\n```"))
   check("单行选区写成 第 2 行（不是 第 2–2 行）", p2.includes("第 2 行") && !p2.includes("第 2–2 行"))
   const p3 = P({ path: "nb.ipynb", cellIndex: 1, source: "x=1", mode: "explain" })
   check("解释模式不许改代码、也不给 nb_edit 指引", p3.includes("不要改代码") && !p3.includes("nb_edit_cell"))
@@ -857,11 +897,13 @@ console.log("dsh-notebook-v2 · client logic tests\n")
     cellIndex: 1,
     source: "x",
     vars: [{ name: "df", detail: "DataFrame columns: a" }],
-    error: { ename: "ValueError", evalue: "bad", traceback: "tb" },
+    error: { ename: "ValueError", evalue: "bad", traceback: "Traceback (most recent call last):\n  boom" },
   })
-  check("带内核变量与报错", p4.includes("df：DataFrame columns: a") && p4.includes("ValueError: bad"))
+  check("报错只留一行（traceback 让 agent 用 nb_error_context 拿）", p4.includes("报错：ValueError: bad") && !p4.includes("Traceback"))
+  check("不再贴内核变量列表（agent 有 nb_list_vars）", !p4.includes("内核里已有的变量") && !p4.includes("DataFrame columns"))
   const longSrc = Array.from({ length: 400 }, (_, i) => "line" + i).join("\n")
-  check("超长源码被截断（不把整格灌进对话）", P({ path: "n.ipynb", cellIndex: 1, source: longSrc }).includes("已截断"))
+  const p5 = P({ path: "n.ipynb", cellIndex: 1, source: longSrc })
+  check("整格源码再长也不进提示词（与长度无关地瘦）", !p5.includes("line0") && p5.length < 400)
 }
 
 // ── 13. 面板级 Enter 组合分发（v6 第 3 条反馈的判定矩阵） ──
@@ -1605,6 +1647,57 @@ console.log("dsh-notebook-v2 · client logic tests\n")
     const nodes = I.ansiNodes("\u001b[31mR\u001b[0m")
     return Array.isArray(nodes) && nodes.length >= 1 && nodes[0].type === "span" && !!nodes[0].props.style.color
   })())
+}
+
+// ── 阅读位置记忆：打开 notebook 要回到上次位置，没记录就回第一格 ──
+{
+  console.log("[view state]")
+  const memStore = () => {
+    const m = new Map()
+    return {
+      getItem: (k) => (m.has(k) ? m.get(k) : null),
+      setItem: (k, v) => m.set(k, String(v)),
+      dump: m,
+    }
+  }
+  const rects = [
+    { id: "a", top: 0, bottom: 100 },
+    { id: "b", top: 100, bottom: 300 },
+    { id: "c", top: 300, bottom: 340 },
+  ]
+  check("顶部时取第一格", I.pickTopCellId(rects, 0) === "a")
+  check("半截露在顶部算这一格（不是下一格）", I.pickTopCellId(rects, 210) === "b")
+  check("正好在格的边界上取这一格", I.pickTopCellId(rects, 100) === "b")
+  check("滚过全部内容返回最后一格", I.pickTopCellId(rects, 9999) === "c")
+  check("没有格子返回空串", I.pickTopCellId([], 10) === "" && I.pickTopCellId(null, 0) === "")
+
+  const store = memStore()
+  check("空 path 不产生键", I.viewStoreKey("") === "")
+  check("键带版本前缀 + 绝对路径", I.viewStoreKey("E:/a/b.ipynb") === `${I.VIEW_STATE_PREFIX}E:/a/b.ipynb`)
+  check("没有记录读回 null", I.loadViewState("E:/a/b.ipynb", store) === null)
+  check(
+    "写进去能读回来（top + cellId）",
+    (() => {
+      I.saveViewState("E:/a/b.ipynb", { top: 1280, cellId: "b" }, store)
+      const v = I.loadViewState("E:/a/b.ipynb", store)
+      return v && v.top === 1280 && v.cellId === "b"
+    })(),
+  )
+  check(
+    "不同 notebook 互不覆盖",
+    (() => {
+      I.saveViewState("E:/a/c.ipynb", { top: 20, cellId: "z" }, store)
+      return I.loadViewState("E:/a/b.ipynb", store).top === 1280 && I.loadViewState("E:/a/c.ipynb", store).top === 20
+    })(),
+  )
+  check(
+    "坏 JSON 不抛、回 null",
+    (() => {
+      store.setItem(I.viewStoreKey("E:/a/bad.ipynb"), "{not json")
+      return I.loadViewState("E:/a/bad.ipynb", store) === null
+    })(),
+  )
+  check("空 path 写入被拒（不报错）", I.saveViewState("", { top: 1 }, store) === false)
 }
 
 console.log(`\n${failures.length === 0 ? "全部通过 ✅" : `${failures.length} 项失败 ❌：${failures.join(" | ")}`}`)
